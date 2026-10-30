@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import require_portfolio_owner
 from app.core.deps import get_current_user, get_session_with_rls
-from app.core.exceptions import AccountNotFoundError, ConfigurationError
+from app.core.exceptions import AccountNotFoundError, AccountValidationError, ConfigurationError
 from app.models.user import User
 from app.schemas.account import (
     AccountCreate,
@@ -109,15 +109,20 @@ async def list_accounts(
 @router.post(
     "/test-connection",
     response_model=ResponseEnvelope[BrokerConnectionTestResult],
-    summary="Test Broker API Connection",
-    description=("Validate supplied (or stored) broker credentials for IBKR or Schwab without creating or updating an account."),
+    status_code=status.HTTP_200_OK,
+    summary="Test a broker API connection",
+    description=(
+        "Validate supplied (or stored) broker credentials for IBKR or Schwab without creating or updating an account. "
+        "Only 'ibkr' and 'schwab' are valid payload types. Referencing an existing generic account returns HTTP 400 "
+        "because generic accounts support CSV/JSON file imports only, without credentials or API connections."
+    ),
     response_description="Credential validation result wrapped in a response envelope.",
     responses={
         200: {"description": "Connection test succeeded."},
-        400: {"description": "Credential validation failed."},
+        400: {"description": "Credential/configuration validation failed, or account_id references a generic account with no API support."},
         401: {"description": "Missing or invalid Bearer token."},
-        404: {"description": "Account not found when account_id is provided."},
-        422: {"description": "Request payload failed schema validation."},
+        404: {"description": "Portfolio not owned/found, or supplied account_id not found in the owned path portfolio."},
+        422: {"description": "Request validation failed; payload type must be 'ibkr' or 'schwab', never 'generic' or 'manual'."},
     },
 )
 async def test_connection(
@@ -126,7 +131,25 @@ async def test_connection(
     current_user: Annotated[User, Depends(get_current_user)],
     broker_service: Annotated[BrokerService, Depends(_get_broker_service)],
 ) -> ResponseEnvelope[BrokerConnectionTestResult]:
-    """Validate broker credentials for the current user and portfolio."""
+    """Validate broker credentials for the current user and portfolio.
+
+    Args:
+        portfolio_id: UUID of the owned portfolio used for account lookup.
+        payload: IBKR/Schwab credential overrides and an optional existing account.
+        current_user: The authenticated account owner.
+        broker_service: Injected broker credential validation service.
+
+    Returns:
+        A response envelope containing the connection test result.
+
+    Raises:
+        HTTPException: 400 if credential/configuration validation fails or an
+            existing generic account is supplied.
+        HTTPException: 401 if authentication fails.
+        HTTPException: 404 if the portfolio or supplied account is not owned/found.
+        HTTPException: 422 if the request is invalid, including payload type
+            'generic'; only 'ibkr' and 'schwab' support connection tests.
+    """
     try:
         result = await broker_service.test_connection(
             payload=payload,
@@ -144,17 +167,19 @@ async def test_connection(
     "",
     response_model=ResponseEnvelope[AccountRead],
     status_code=status.HTTP_201_CREATED,
-    summary="Create a Trading Account",
+    summary="Create a trading account",
     description=(
         "Create a new trading account owned by the currently authenticated user. "
-        "Each account tracks trades under a single broker and currency. "
-        "A user may have multiple accounts (e.g. one per broker or strategy)."
+        "The path portfolio_id determines the owned portfolio; account currency is inherited from its base_currency. "
+        "Supported types are 'manual', 'ibkr', 'schwab' and 'generic'. Generic accounts accept generic v1 CSV/JSON file imports only, "
+        "do not store credentials and cannot use API sync. A non-empty properties map for a generic account returns HTTP 422."
     ),
     response_description="The newly created account wrapped in a response envelope.",
     responses={
         201: {"description": "Account created successfully."},
         401: {"description": "Missing or invalid Bearer token."},
-        422: {"description": "Request payload failed schema validation."},
+        404: {"description": "Path portfolio not found or not owned by the current user."},
+        422: {"description": "Request validation failed, including non-empty credential properties for a generic account."},
     },
 )
 async def create_account(
@@ -166,32 +191,49 @@ async def create_account(
     """Create a new trading account for the authenticated user.
 
     The account is automatically scoped to the calling user's ID; callers
-    cannot create accounts on behalf of other users.
+    cannot create accounts on behalf of other users. The path portfolio
+    supplies both portfolio ownership and account currency. Generic accounts
+    are file-only and reject non-empty credential properties.
 
     Args:
-        payload: Validated account creation data (name, broker, currency).
+        portfolio_id: UUID of the owned portfolio to contain the account.
+        payload: Account name, type and optional number, properties and settings.
         current_user: Injected authenticated user ORM instance.
         service: Injected account service.
 
     Returns:
         A :class:`ResponseEnvelope` containing the created
         :class:`AccountRead` DTO.
+
+    Raises:
+        HTTPException: 401 if authentication fails.
+        HTTPException: 404 if the path portfolio is not found or not owned.
+        HTTPException: 422 if request validation fails or a generic account
+            includes non-empty credential properties.
     """
     account_payload = payload.model_copy(update={"portfolio_id": portfolio_id})
-    account = await service.create_account(account_payload, current_user.id)
+    try:
+        account = await service.create_account(account_payload, current_user.id)
+    except AccountValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
     return ResponseEnvelope[AccountRead](data=account)
 
 
 @router.get(
     "/{account_id}/credentials",
     response_model=ResponseEnvelope[AccountCredentialsRead],
-    summary="Get Account Credentials",
-    description=("Return decrypted broker credentials for an account owned by the authenticated user."),
+    status_code=status.HTTP_200_OK,
+    summary="Get account credentials",
+    description=(
+        "Return decrypted broker credentials for an account in the authenticated user's path portfolio. "
+        "Generic accounts never store broker credentials and return HTTP 422 rather than an empty credential response."
+    ),
     response_description="Plaintext credentials wrapped in a response envelope.",
     responses={
         200: {"description": "Credentials returned successfully."},
         401: {"description": "Missing or invalid Bearer token."},
-        404: {"description": "Account not found (or owned by another user)."},
+        404: {"description": "Portfolio/account not found, not owned, or account outside the path portfolio."},
+        422: {"description": "Generic accounts do not support broker credentials, or request parameters are invalid."},
     },
 )
 async def get_account_credentials(
@@ -200,7 +242,23 @@ async def get_account_credentials(
     current_user: Annotated[User, Depends(get_current_user)],
     service: Annotated[AccountService, Depends(_get_service)],
 ) -> ResponseEnvelope[AccountCredentialsRead]:
-    """Return decrypted account credentials for the authenticated owner."""
+    """Return decrypted account credentials for the authenticated owner.
+
+    Args:
+        portfolio_id: UUID of the owned portfolio containing the account.
+        account_id: UUID of the account whose credentials are requested.
+        current_user: The authenticated account owner.
+        service: Injected account service.
+
+    Returns:
+        A response envelope containing the plaintext credential map.
+
+    Raises:
+        HTTPException: 401 if authentication fails.
+        HTTPException: 404 if the portfolio/account is not owned/found or the
+            account is outside the path portfolio.
+        HTTPException: 422 if the account is generic or parameters are invalid.
+    """
     try:
         credentials = await service.get_account_credentials(
             account_id=account_id,
@@ -209,6 +267,8 @@ async def get_account_credentials(
         )
     except AccountNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found.") from exc
+    except AccountValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
     return ResponseEnvelope[AccountCredentialsRead](data=credentials)
 
 
@@ -262,19 +322,29 @@ async def get_account(
 @router.patch(
     "/{account_id}",
     response_model=ResponseEnvelope[AccountRead],
-    summary="Update a Trading Account",
+    status_code=status.HTTP_200_OK,
+    summary="Update a trading account",
     description=(
         "Apply a partial update to a trading account owned by the authenticated "
         "user. Only fields present in the request body are modified; omitted "
         "fields retain their current values. "
-        "Returns 404 if the account does not exist or belongs to a different user."
+        "Returns 404 if the account is not in the owned path portfolio. Generic accounts support file imports only and reject "
+        "non-empty credential properties, including when type is omitted. Switching an account with stored credentials to 'generic' is also rejected. "
+        "Changing type to or from 'generic' requires no raw transactions, logical executions or trades; suppressed/deleted history still counts. "
+        "Transitions involving 'manual' do not bypass this guard. The history check and type update share the account lock with ingestion. "
+        "Use a new account or explicitly clear all history before switching, subject to the credential restrictions."
     ),
     response_description=("The account after applying the partial update, wrapped in a response envelope."),
     responses={
         200: {"description": "Account updated successfully."},
         401: {"description": "Missing or invalid Bearer token."},
-        404: {"description": "Account not found (or owned by another user)."},
-        422: {"description": "Request payload failed schema validation."},
+        404: {"description": "Portfolio/account not found, not owned, or account outside the path portfolio."},
+        422: {
+            "description": (
+                "Request validation or generic credential rules failed, or a type change to/from generic retains any raw/logical/trade history, "
+                "including suppressed/deleted rows and transitions involving manual."
+            )
+        },
     },
 )
 async def update_account(
@@ -288,11 +358,19 @@ async def update_account(
 
     Only the fields present in the request body are written. Fields that
     are absent (or explicitly ``None``) are not changed. Ownership is
-    enforced — accounts belonging to other users raise HTTP 404.
+    enforced — accounts belonging to other users raise HTTP 404. Non-empty
+    credential properties are rejected when the effective type is generic;
+    accounts with stored credentials cannot be switched to generic.
+    Any type change to/from generic also requires no raw, logical or trade
+    history, including suppressed/deleted rows. Passing through manual does
+    not bypass the guard. History checks and updates are serialized against
+    account-targeted ingestion. Use a new account or explicitly clear all
+    history first; credential restrictions still apply.
 
     Args:
+        portfolio_id: UUID of the owned portfolio containing the account.
         account_id: UUID path parameter identifying the account.
-        payload: Partial update data (name, broker, currency, is_active).
+        payload: Partial name, number, type, active flag, properties or settings.
         current_user: Injected authenticated user ORM instance.
         service: Injected account service.
 
@@ -301,7 +379,12 @@ async def update_account(
         :class:`AccountRead` DTO.
 
     Raises:
-        HTTPException: 404 if the account is not found for this user.
+        HTTPException: 401 if authentication fails.
+        HTTPException: 404 if the portfolio/account is not owned/found or the
+            account is outside the path portfolio.
+        HTTPException: 422 if validation fails or generic credential rules
+            would be violated, or a type change to/from generic is attempted
+            while any raw/logical/trade history remains.
     """
     try:
         account = await service.update_account(
@@ -312,6 +395,8 @@ async def update_account(
         )
     except AccountNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found.") from exc
+    except AccountValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
     return ResponseEnvelope[AccountRead](data=account)
 
 

@@ -25,9 +25,12 @@
 "use client";
 
 import { useState, useRef, useCallback, useEffect } from "react";
+import Link from "next/link";
 import { Copy, CheckCircle2, ChevronDown, ChevronUp } from "lucide-react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAccounts, useUpdateAccount } from "@/hooks/useAccounts";
+import { useImportUpload } from "@/hooks/useImportUpload";
+import { useGenericImportDownload } from "@/hooks/useGenericImportDownload";
 import { usePortfolioStore } from "@/stores/portfolioStore";
 import { Spinner } from "@/components/ui/Spinner";
 import { FileQueue, FileQueueSummary } from "@/components/imports/FileQueue";
@@ -35,32 +38,18 @@ import { ImportLogLine } from "@/components/imports/ImportLogLine";
 import { ImportDateRange } from "@/components/imports/ImportDateRange";
 import { capabilityFor } from "@/components/imports/ImportCapability";
 import type { QueuedFile } from "@/components/imports/FileQueue";
-import type { ImportResult, BrokerSyncResult, ResponseEnvelope, AccountType, FlexFromDatePreset } from "@/lib/types";
+import type { BrokerSyncResult, AccountType, FlexFromDatePreset } from "@/lib/types";
 import { client } from "@/lib/api/client.gen";
 import { syncAccountApiV1BrokerSyncAccountIdPost } from "@/lib/api";
 import { extractApiError } from "@/lib/apiErrors";
-
-/** Multipart upload via raw fetch — bypasses the JSON body serializer of the SDK client. */
-async function multipartPost(path: string, formData: FormData): Promise<ResponseEnvelope<ImportResult>> {
-  const token = localStorage.getItem("access_token");
-  const baseUrl = client.getConfig().baseUrl ?? "";
-  const res = await fetch(`${baseUrl}${path}`, {
-    method: "POST",
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
-    body: formData,
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw err;
-  }
-  return res.json();
-}
+import { extractImportRowErrors } from "@/lib/importErrors";
 
 // Type badge helper
 const TYPE_LABEL: Record<AccountType, string> = {
   manual: "Manual",
   schwab: "Schwab",
   ibkr: "IBKR",
+  generic: "Other broker (CSV/JSON)",
 };
 
 // Accepted file extensions per account type
@@ -68,6 +57,7 @@ const ACCOUNT_ACCEPT: Record<AccountType, string> = {
   ibkr: ".xml",
   schwab: ".json",
   manual: "",
+  generic: ".csv,.json",
 };
 
 // Human-readable format hint per account type
@@ -75,6 +65,7 @@ const ACCOUNT_FORMAT_HINT: Record<AccountType, string> = {
   ibkr: "XML (IBKR Flex Query)",
   schwab: "JSON files (Schwab Transactions)",
   manual: "",
+  generic: "CSV or JSON files (generic execution format)",
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -140,6 +131,7 @@ export function ImportForm() {
   const portfolioId = usePortfolioStore((state) => state.activePortfolioId);
   const { data: accounts, isLoading: loadingAccounts } = useAccounts(portfolioId ?? undefined);
   const updateAccount = useUpdateAccount(accountId);
+  const { mutateAsync: uploadFile } = useImportUpload();
 
   const selectedAccount = accounts?.find((a) => a.id === accountId) ?? null;
   const accountType: AccountType | null = selectedAccount?.type ?? null;
@@ -155,7 +147,7 @@ export function ImportForm() {
 
     const acc = accounts?.find((a) => a.id === id);
     // Default to sync tab when API keys exist, otherwise upload
-    setActiveTab(acc?.has_api_keys ? "sync" : "upload");
+    setActiveTab((acc?.type === "ibkr" || acc?.type === "schwab") && acc.has_api_keys ? "sync" : "upload");
     if (acc?.settings) {
       setFlexPreset(acc.settings.flex_from_date_preset ?? "ytd");
       setFlexCustomDate(acc.settings.flex_custom_from_date ?? getYTDFromDate());
@@ -223,13 +215,12 @@ export function ImportForm() {
 
         const qf = files[i];
         try {
-          const formData = new FormData();
-          formData.append("account_id", accountId);
-          formData.append("file", qf.file);
-          if (overwrite) formData.append("overwrite_manually_edited", "true");
-
-          const envelope = await multipartPost(`/api/v1/portfolios/${portfolioId}/imports/upload`, formData);
-          const result = envelope.data;
+          const result = await uploadFile({
+            portfolioId,
+            accountId,
+            file: qf.file,
+            overwriteManuallyEdited: overwrite,
+          });
 
           setQueuedFiles((prev) =>
             prev.map((f, idx) =>
@@ -240,7 +231,7 @@ export function ImportForm() {
           const errorMsg = extractApiError(err, err instanceof Error ? err.message : "Upload failed.");
           setQueuedFiles((prev) =>
             prev.map((f, idx) =>
-              idx === i ? { ...f, status: "error", error: errorMsg } : f
+              idx === i ? { ...f, status: "error", error: errorMsg, rowErrors: extractImportRowErrors(err) } : f
             )
           );
         }
@@ -256,7 +247,7 @@ export function ImportForm() {
       void qc.invalidateQueries({ queryKey: ["stats"] });
       void qc.invalidateQueries({ queryKey: ["accounts"] });
     },
-    [accountId, qc]
+    [accountId, portfolioId, qc, uploadFile]
   );
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -506,14 +497,16 @@ export function ImportForm() {
                 />
               )}
             </div>
-          ) : (accountType === "ibkr" || accountType === "schwab") ? (
-            /* Broker account without API keys — only show upload */
+          ) : (accountType === "ibkr" || accountType === "schwab" || accountType === "generic") ? (
+            /* Generic accounts and native brokers without API keys use file upload only. */
             <div className="solid-card p-6 space-y-4">
-              <div className="flex items-start gap-2 bg-amber-500/10 border border-amber-500/30 rounded-md px-4 py-3">
-                <span className="text-amber-600 text-sm leading-relaxed">
-                  ⚠ No API credentials stored for this {TYPE_LABEL[accountType]} account. Add them in Settings → Accounts to enable API sync, or upload files below.
-                </span>
-              </div>
+              {accountType !== "generic" && (
+                <div className="flex items-start gap-2 bg-amber-500/10 border border-amber-500/30 rounded-md px-4 py-3">
+                  <span className="text-amber-600 text-sm leading-relaxed">
+                    ⚠ No API credentials stored for this {TYPE_LABEL[accountType]} account. Add them in Settings → Accounts to enable API sync, or upload files below.
+                  </span>
+                </div>
+              )}
               <FileUploadCard
                 accountType={accountType}
                 queuedFiles={queuedFiles}
@@ -582,10 +575,12 @@ function FileUploadCard({
         <h3 className="text-sm font-semibold text-foreground">
           Upload Files
         </h3>
-        <p className="text-xs text-muted-foreground mt-0.5">
+        <p className={`text-xs ${accountType === "generic" ? "text-foreground" : "text-muted-foreground"} mt-0.5`}>
           Import from broker export files ({ACCOUNT_FORMAT_HINT[accountType]}).
         </p>
       </div>
+
+      {accountType === "generic" && <GenericImportFormatHint />}
 
       {/* File input — multi */}
       {!isQueueRunning && !queueDone && (
@@ -594,6 +589,8 @@ function FileUploadCard({
             ref={fileInputRef}
             id="file"
             type="file"
+            aria-label="Broker export files"
+            aria-describedby={accountType === "generic" ? "generic-import-hint" : undefined}
             multiple
             accept={ACCOUNT_ACCEPT[accountType]}
             onChange={handleFileChange}
@@ -664,6 +661,35 @@ function FileUploadCard({
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+function GenericImportFormatHint() {
+  const { mutate: download, isPending, variables, error } = useGenericImportDownload();
+  const linkClass = "text-foreground underline underline-offset-2 rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50";
+
+  return (
+    <div id="generic-import-hint" className="rounded-md border border-border bg-secondary p-4 space-y-2 text-xs text-foreground">
+      <p>
+        Use one record per execution (fill), with a stable <code className="font-mono">execution_id</code> and a timestamp including a timezone.
+        Convert your broker export to the generic format before uploading.
+      </p>
+      <div className="flex flex-wrap gap-x-4 gap-y-2">
+        <Link href="/help#generic-import-format" className={linkClass}>Generic import format help</Link>
+        <button type="button" onClick={() => download("schema")} disabled={isPending} className={linkClass}>
+          {isPending && variables === "schema" ? "Downloading JSON Schema…" : "Download JSON Schema"}
+        </button>
+        <button type="button" onClick={() => download("template")} disabled={isPending} className={linkClass}>
+          {isPending && variables === "template" ? "Downloading CSV template…" : "Download CSV template"}
+        </button>
+      </div>
+      {isPending && (
+        <p role="status" aria-live="polite" className="text-xs text-foreground">
+          {variables === "schema" ? "Downloading JSON Schema…" : "Downloading CSV template…"}
+        </p>
+      )}
+      {error != null && <p role="alert" className="text-foreground">{extractApiError(error, "Download failed. Please try again.")}</p>}
     </div>
   );
 }

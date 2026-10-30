@@ -21,7 +21,9 @@ import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import AccountNotFoundError
+from app.core.constants import GENERIC_ACCOUNT_CREDENTIALS_ERROR, GENERIC_ACCOUNT_HISTORY_ERROR
+from app.core.exceptions import AccountNotFoundError, AccountValidationError
+from app.models.account import AccountType
 from app.repositories.account_repository import AccountRepository
 from app.repositories.broker_raw_transaction_repository import (
     BrokerRawTransactionRepository,
@@ -172,6 +174,9 @@ class AccountService:
         if account is None:
             raise AccountNotFoundError(f"Account {account_id} not found.")
 
+        if account.type == AccountType.GENERIC:
+            raise AccountValidationError(GENERIC_ACCOUNT_CREDENTIALS_ERROR)
+
         properties: dict[str, str] = {}
         for prop in account.properties:
             properties[prop.key] = decrypt_token(prop.value)
@@ -196,6 +201,9 @@ class AccountService:
             A :class:`~app.schemas.account.AccountRead` DTO for the
             newly created account.
         """
+        if data.type == AccountType.GENERIC and data.properties:
+            raise AccountValidationError(GENERIC_ACCOUNT_CREDENTIALS_ERROR)
+
         account = await self._repo.create(data, user_id)
         if data.properties:
             for key, value in data.properties.items():
@@ -228,7 +236,8 @@ class AccountService:
         If ``data.properties`` is provided, each key-value pair is upserted
         (encrypted) as :class:`~app.models.account_property.AccountProperty`
         records.  Existing properties not included in the update payload are
-        left unchanged.  Commits the session after all writes.
+        left unchanged. The account is locked against concurrent imports and
+        credential writes; the caller commits the transaction.
 
         Args:
             account_id: UUID of the account to update.
@@ -242,10 +251,17 @@ class AccountService:
         Raises:
             :class:`~app.core.exceptions.AccountNotFoundError`: If no
                 account with that ID exists for the requesting user.
+            AccountValidationError: If a generic namespace transition retains
+                trading history or the resulting generic account has credentials.
         """
-        account = await self._repo.get_by_id(account_id, user_id, portfolio_id)
+        account = await self._repo.get_by_id(account_id, user_id, portfolio_id, for_update=True)
         if account is None:
             raise AccountNotFoundError(f"Account {account_id} not found.")
+        effective_type = data.type if data.type is not None else account.type
+        if effective_type != account.type and AccountType.GENERIC in (account.type, effective_type) and await self._repo.has_trading_history(account_id):
+            raise AccountValidationError(GENERIC_ACCOUNT_HISTORY_ERROR)
+        if effective_type == AccountType.GENERIC and (data.properties or account.properties):
+            raise AccountValidationError(GENERIC_ACCOUNT_CREDENTIALS_ERROR)
         updated = await self._repo.update(account, data)
         if data.properties:
             for key, value in data.properties.items():
@@ -258,7 +274,7 @@ class AccountService:
         # Persist settings if provided (merge with existing via repo)
         if data.settings is not None:
             await self._repo.update_settings(updated.id, user_id, data.settings)
-        await self._session.commit()
+        await self._session.flush()
         # Re-fetch with selectinload so that updated.properties is eagerly
         # loaded in the async context — bare refresh() does not load relations.
         refreshed = await self._repo.get_by_id(updated.id, user_id)

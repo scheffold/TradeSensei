@@ -867,12 +867,14 @@ class TestSchwabCallbackComplete:
             patch("app.services.broker_service.settings") as mock_settings,
             patch("app.services.broker_service.decrypt_token", side_effect=lambda x: x.replace("encrypted-", "")),
             patch.object(svc, "_resolve_account_by_oauth_state", new=AsyncMock(return_value=account)),
+            patch.object(svc._account_repo, "get_by_id_with_properties", new=AsyncMock(return_value=account)) as locked_lookup,
             patch.object(svc, "_exchange_and_store", new=AsyncMock()) as mock_exchange,
         ):
             mock_settings.schwab_oauth_mode = "callback"
             res = await svc.complete_schwab_callback(code="code123", state="state123")
 
         assert res == account
+        locked_lookup.assert_awaited_once_with(account.id, account.user_id, for_update=True)
         mock_exchange.assert_awaited_once_with(account, code="code123", state="state123", verifier="verifier")
 
     @pytest.mark.unit

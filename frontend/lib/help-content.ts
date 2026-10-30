@@ -545,6 +545,76 @@ export const HELP_SECTIONS: HelpSection[] = [
       },
     ],
   },
+  // ── Importing from other brokers ──────────────────────────────────────────
+  {
+    heading: "Importing from other brokers",
+    entries: [
+      {
+        id: "generic-import-format",
+        label: "Generic import format",
+        summary: "Import execution-level CSV or JSON files from brokers without native support.",
+        detail:
+          "Create an **Other broker (CSV/JSON)** account in the target portfolio, then select it on the Import page. Convert your broker export to the generic format first: each row or JSON object represents **one execution (fill), not an entire trade**. The existing import pipeline matches fills into trades.\n\n" +
+          "Generic accounts accept `.csv` and `.json` files only; they do not store credentials or support API sync. Keep native IBKR and Schwab exports in their respective account types. Account currency comes from its portfolio.\n\n" +
+          "**Required fill fields**\n\n" +
+          "- `execution_id`: stable, non-empty fill identifier, at most 100 characters and unique within the file.\n" +
+          "- `executed_at`: ISO 8601 timestamp with `Z` or an explicit UTC offset, such as `2026-03-14T15:31:07Z`. Timestamps are converted to UTC; missing timezones and offsets that move the result outside years 0001–9999 are rejected.\n" +
+          "- `symbol`: the instrument symbol. Keep its spelling consistent across fills and exports, including when using an OCC option symbol.\n" +
+          "- `asset_class`: `EQUITY`, `OPTION`, `FUTURE`, `FOREX` or `CRYPTO`.\n" +
+          "- `side`: `BUY` or `SELL`, describing the fill rather than the direction of the whole position.\n" +
+          "- `quantity`: an absolute decimal quantity greater than zero.\n" +
+          "- `price`: a decimal greater than or equal to zero, per unit without the contract multiplier.\n" +
+          "- `currency`: a three-letter uppercase ISO 4217 code, such as `USD`.\n\n" +
+          "**Optional and conditional fields**\n\n" +
+          "- `commission`: all execution fees as a non-negative absolute amount; defaults to `0`.\n" +
+          "- `open_close`: `OPEN` or `CLOSE`, required whenever `order_id` is present. Without order metadata, it may be empty; mark closing fills explicitly, especially for pre-period positions.\n" +
+          "- `multiplier`: an explicitly supplied integer of at least `1` for `OPTION` and `FUTURE`; defaults to `1` otherwise.\n" +
+          "- `instrument_id`: a stable contract identifier, at most 50 characters, required for `FUTURE`, plain-symbol `OPTION` and **any order-linked fill**, even a separately uploaded OCC leg. Without `order_id`, ordinary `EQUITY`/`FOREX`/`CRYPTO` and valid OCC-symbol options may omit it. Different contracts need different IDs; preserve ID presence/values across opening/closing fills and exports.\n" +
+          "- `expiry` (`YYYY-MM-DD`), `strike` (greater than zero) and `option_type` (`C` or `P`): required for options unless missing values can be derived from a valid OCC option symbol. Explicit values must agree with that symbol. `expiry` is optional for futures.\n" +
+          "- `order_id`: groups the legs of one multi-leg order. Keep the same ID across exports of that order, but use different IDs for opening and closing orders.\n" +
+          "- `realized_pnl`: broker-reported realized P&L, required for every order-linked `CLOSE`; explicit `0` is valid only for a genuine breakeven close. An explicit `OPEN` must leave it absent/null, not zero.\n\n" +
+          "**CSV and JSON encoding**\n\n" +
+          "CSV uses UTF-8 (an optional BOM is accepted), commas and a mandatory header with the eight unconditional field names. Add conditional columns only when a row needs them; ordinary equity files do not need derivative/order headers. Column order does not matter, and empty optional cells are treated as absent. Field names are case-sensitive; enum values are case-insensitive.\n\n" +
+          "JSON requires a top-level object with a string `schema_version` (`\"1\"` or starting with `\"1.\"`) and a non-empty `executions` array. An optional `corporate_actions` array supports stock splits in JSON only, with a positive `ratio` (after-shares divided by before-shares). Execution decimals and split ratios fit `Numeric(18,8)`: at most 10 integer digits and 8 fractional places; a ratio below `0.00000001` is rejected, not rounded to zero. Decimal values may be JSON numbers or strings; use `.` without thousands separators.\n\n" +
+          "The original record and arbitrary unknown fields are retained under inert `raw_data.source_record`; unknown CSV columns also produce a warning once per column. Native control names such as `brokerageOrderID`, `netCash` and `openCloseIndicator` do not affect grouping, cash or flips. Only validated v1 fields supply active order metadata and derived cash.\n\n" +
+          "The maximum file size is 10 MB. The entire file is validated before anything is saved. If any row is invalid, no executions or trades are imported; correct the line/index and field errors shown on the Import page and try again. XML is not supported.\n\n" +
+          "**Schema and template downloads**\n\n" +
+          "On the help page, use **Download JSON Schema** and **Download CSV template** below while signed in. No portfolio selection is required. The template contains an equity round trip and an option spread with explicit contract IDs. These controls authenticate the requests for you; a plain download URL does not supply your login token.\n\n" +
+          "API endpoints: `GET /api/v1/imports/generic/schema` and `GET /api/v1/imports/generic/template.csv`.",
+      },
+      {
+        id: "generic-execution-id",
+        label: "execution_id & re-imports",
+        summary: "Stable fill IDs prevent duplicates within each generic account.",
+        detail:
+          "Every fill must have a non-empty `execution_id`, unique within its file and stable across later exports. Preserve the broker's execution identifier where possible. Do not use row numbers that change when an export grows, and do not assign a new ID merely to correct an existing fill. Duplicate IDs within one file reject the entire upload.\n\n" +
+          "Duplicate prevention is scoped to your user and the selected generic account. Re-importing the same file into the same account creates no additional rows; overlapping files add only previously unseen IDs. The same execution ID in two different generic accounts is stored separately, so keep each broker or source in its own account.\n\n" +
+          "Keep symbol spelling and instrument ID presence/values consistent across exports; they are part of matching identity, not display-only metadata. Account-scoped fill IDs prevent duplicate-key collisions, while protection and existing-trade matching also distinguish account, symbol, asset class, contract ID and opening time.\n\n" +
+          "Re-import does **not** update an existing raw execution, even if its values changed. Make corrections in the execution editor, or use the account's **Clear All Trades** action and re-import a corrected complete history. Clearing trades is destructive: keep your source exports and review the confirmation before proceeding.\n\n" +
+          "Prefer a new account when moving between native and generic imports. A type change to/from generic is blocked while any raw transactions, logical executions or trades remain, including deleted/suppressed history; switching through Manual does not bypass this. **Clear All Trades** must remove all history first, not just visible trades, and stored credentials must also be absent before switching to generic.",
+      },
+      {
+        id: "generic-open-close",
+        label: "Closing rows & open_close",
+        summary: "Mark closing fills with CLOSE, especially for positions opened before the exported period.",
+        detail:
+          "Use `open_close=OPEN` for opening fills and `open_close=CLOSE` for closing fills. This is especially important when the opening execution is outside the file's date range. Without `CLOSE` or `realized_pnl`, an unmatched SELL may be interpreted as a new short position rather than the close of a pre-period position.\n\n" +
+          "Only without `order_id` may `CLOSE` omit `realized_pnl` and use the pipeline's zero-P&L closing marker. That marker identifies an ordinary FIFO close; it does **not** mean the resulting trade's calculated P&L must be zero.\n\n" +
+          "Every order-linked row needs `instrument_id` and explicit `open_close`, even if only one leg appears in the file. Every order-linked `CLOSE` also needs broker-reported `realized_pnl`, including explicit `0` for a genuine breakeven close; combo P&L sums those values. An explicit `OPEN` with any non-null P&L, including `0`, is rejected, so leave it absent/null or blank in CSV.\n\n" +
+          "Split a position flip into two rows with different execution IDs: first a `CLOSE` for the quantity that flattens the existing position, then an `OPEN` for the remaining quantity. Keep the timestamp and per-unit price on both rows. Allocate commission between the portions without duplicating fees and put reported realized P&L only on the close. If supplying order metadata, use different order IDs for CLOSE and OPEN; v1 has no combined position-flip marker.",
+      },
+      {
+        id: "generic-multi-leg-orders",
+        label: "Multi-leg orders",
+        summary: "Group combo legs with order IDs and give each distinct contract its own stable instrument ID.",
+        detail:
+          "Every `order_id`-linked fill needs a non-empty, stable `instrument_id` and an explicit `OPEN` or `CLOSE` marker, even a single OCC-symbol leg uploaded separately. Different contracts need different instrument IDs; reuse each contract's ID and symbol spelling on opening/closing fills and across later exports. Multiple fills of the same contract may share its instrument ID, but every fill needs its own `execution_id`.\n\n" +
+          "Legs intended to form one combo order share `order_id`, the execution timestamp and the same `open_close` marker. Reuse an order ID across exports of that same order, but give opening and closing orders **different order IDs**, for example `spread-open-1` and `spread-close-1`. Marker consistency is checked within the file and against already imported raw history in the target account before insertion. Supply the option contract fields (or a valid OCC symbol) and an explicit multiplier; explicit fields must agree with the symbol.\n\n" +
+          "Every order-linked CLOSE requires reported `realized_pnl`, including explicit zero for genuine breakeven; every OPEN leaves P&L absent/null. Different contracts in one order cannot reuse one instrument ID. These requirements apply to partial files too, not only files containing the whole combo. The CSV template in **Generic import format** shows an opening option spread with explicit, distinct contract IDs.\n\n" +
+          "Without order metadata, FUTURE and plain-symbol OPTION fills still require instrument IDs. Only ordinary EQUITY/FOREX/CRYPTO and standalone valid OCC-symbol options may omit them; keep ID presence consistent across exports. V1 does not invent contract IDs or change FIFO/combo matching to resolve ambiguous records.",
+      },
+    ],
+  },
   {
     heading: "AI & MCP Integration",
     entries: [

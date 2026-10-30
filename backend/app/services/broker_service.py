@@ -31,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.constants import (
+    GENERIC_ACCOUNT_API_ERROR,
     SCHWAB_ACCESS_TOKEN,
     SCHWAB_OAUTH_CODE_VERIFIER,
     SCHWAB_OAUTH_STATE,
@@ -78,6 +79,12 @@ SCHWAB_ACCESS_TOKEN_KEYS = ("schwab_access_token", SCHWAB_ACCESS_TOKEN)
 SCHWAB_REFRESH_TOKEN_KEYS = ("schwab_refresh_token", SCHWAB_REFRESH_TOKEN)
 SCHWAB_TOKEN_EXPIRES_AT_KEYS = ("schwab_token_expires_at", SCHWAB_TOKEN_EXPIRES_AT)
 SCHWAB_REFRESH_SKEW_SECONDS = 60
+
+
+def _reject_generic_api_account(account: Account) -> None:
+    """Keep file-only generic accounts out of broker credential/API paths."""
+    if account.type == AccountType.GENERIC:
+        raise ConfigurationError(GENERIC_ACCOUNT_API_ERROR)
 
 
 class BrokerService:
@@ -140,9 +147,10 @@ class BrokerService:
                 type is ``MANUAL`` (no API sync supported) or required
                 credentials are missing / corrupted.
         """
-        account = await self._account_repo.get_by_id_with_properties(account_id, user_id)
+        account = await self._account_repo.get_by_id_with_properties(account_id, user_id, for_update=True)
         if account is None:
             raise AccountNotFoundError(f"Account {account_id} not found.")
+        _reject_generic_api_account(account)
         if account.type == AccountType.SCHWAB:
             return await self._sync_schwab(account, days, overwrite_manually_edited=overwrite_manually_edited)
         elif account.type == AccountType.IBKR:
@@ -172,9 +180,11 @@ class BrokerService:
                 payload.account_id,
                 user_id,
                 portfolio_id,
+                for_update=True,
             )
             if account is None:
                 raise AccountNotFoundError(f"Account {payload.account_id} not found.")
+            _reject_generic_api_account(account)
 
         if payload.type == AccountType.SCHWAB.value:
             await self._test_schwab(payload.properties or {}, account)
@@ -396,9 +406,10 @@ class BrokerService:
         return next_access_token
 
     async def start_schwab_authorization(self, account_id: uuid.UUID, user_id: uuid.UUID) -> str:
-        account = await self._account_repo.get_by_id_with_properties(account_id, user_id)
+        account = await self._account_repo.get_by_id_with_properties(account_id, user_id, for_update=True)
         if account is None:
             raise AccountNotFoundError(f"Account {account_id} not found.")
+        _reject_generic_api_account(account)
 
         validate_schwab_oauth_mode_redirect(settings.schwab_oauth_mode, settings.schwab_redirect_uri)
 
@@ -430,6 +441,7 @@ class BrokerService:
         state: str,
         verifier: str,
     ) -> None:
+        _reject_generic_api_account(account)
         client_id = self._resolve_property({}, account, SCHWAB_APP_KEY_KEYS)
         client_secret = self._resolve_property({}, account, SCHWAB_APP_SECRET_KEYS)
 
@@ -499,10 +511,11 @@ class BrokerService:
         if settings.schwab_oauth_mode != "paste":
             raise ConfigurationError("Schwab OAuth completion via pasted URL is only available in paste mode.")
 
-        account = await self._account_repo.get_by_id_with_properties(account_id, user_id)
+        account = await self._account_repo.get_by_id_with_properties(account_id, user_id, for_update=True)
         if account is None:
             raise AccountNotFoundError(f"Account {account_id} not found.")
 
+        _reject_generic_api_account(account)
         parsed = urlparse(redirect_url)
         query = parse_qs(parsed.query)
         code = (query.get("code") or [""])[0].strip()
@@ -530,6 +543,12 @@ class BrokerService:
         if account is None:
             raise ConfigurationError("OAuth state could not be matched or has expired.")
 
+        # State resolution may have cached account/credential values before a
+        # concurrent type update. Lock and refresh only the matched account.
+        account = await self._account_repo.get_by_id_with_properties(account.id, account.user_id, for_update=True)
+        if account is None:
+            raise ConfigurationError("OAuth state could not be matched or has expired.")
+        _reject_generic_api_account(account)
         expected_state = self._get_property(account, SCHWAB_OAUTH_STATE)
         if not secrets.compare_digest(state, expected_state):
             raise ConfigurationError("OAuth state mismatch. Please start Schwab authorization again.")
@@ -542,6 +561,7 @@ class BrokerService:
         account = await self._account_repo.get_by_id_with_properties(account_id, user_id)
         if account is None:
             raise AccountNotFoundError(f"Account {account_id} not found.")
+        _reject_generic_api_account(account)
 
         has_access = self._resolve_optional_property(account, SCHWAB_ACCESS_TOKEN_KEYS) is not None
         has_refresh = self._resolve_optional_property(account, SCHWAB_REFRESH_TOKEN_KEYS) is not None
@@ -555,6 +575,7 @@ class BrokerService:
         account = await self._account_repo.get_by_id_with_properties(account_id, user_id)
         if account is None:
             raise AccountNotFoundError(f"Account {account_id} not found.")
+        _reject_generic_api_account(account)
 
         for key in SCHWAB_ACCESS_TOKEN_KEYS:
             await self._delete_account_property(account_id=account.id, key=key)

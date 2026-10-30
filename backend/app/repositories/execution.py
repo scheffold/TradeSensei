@@ -29,22 +29,28 @@ from app.models.logical_execution import (
     EXECUTION_ORIGIN_SPLIT,
     LogicalExecution,
 )
-from app.models.trade import Trade
+from app.models.trade import AssetClass, Trade
 
 
 @dataclass(frozen=True)
 class ExecutionContractRef:
+    """Identify a linked execution and its asset-specific contract."""
+
     execution_id: uuid.UUID
     symbol: str
     conid: str | None
     trade_id: uuid.UUID
+    asset_class: AssetClass
 
 
 @dataclass(frozen=True)
 class TradeContractRef:
+    """Identify the asset-specific contract held by a trade."""
+
     trade_id: uuid.UUID
     symbol: str
     conid: str | None
+    asset_class: AssetClass
 
 
 class ExecutionRepository:
@@ -161,19 +167,35 @@ class ExecutionRepository:
     async def list_unlinked_by_source_ids_for_contracts(
         self,
         source_ids: Sequence[str],
-        contracts: set[tuple[str, str | None]],
+        contracts: set[tuple[str, str | None, str]],
+        *,
+        user_id: uuid.UUID | None = None,
+        account_id: uuid.UUID | None = None,
     ) -> list[LogicalExecution]:
-        """Return unlinked non-deleted executions matching source IDs and contracts."""
+        """Return unlinked executions matching asset-aware lot identities.
+
+        Args:
+            source_ids: Changed raw execution IDs to inspect.
+            contracts: Symbol/contract ID/asset-class identities held by trades.
+            user_id: Optional owning-user scope.
+            account_id: Optional target-account scope.
+
+        Returns:
+            Matching non-deleted, unlinked logical executions.
+        """
         if not source_ids or not contracts:
             return []
 
-        rows = await self.session.execute(
-            select(LogicalExecution).where(
-                LogicalExecution.source_id.in_(source_ids),
-                LogicalExecution.trade_id.is_(None),
-                LogicalExecution.deleted.is_(False),
-            )
+        stmt = select(LogicalExecution).where(
+            LogicalExecution.source_id.in_(source_ids),
+            LogicalExecution.trade_id.is_(None),
+            LogicalExecution.deleted.is_(False),
         )
+        if user_id is not None:
+            stmt = stmt.where(LogicalExecution.user_id == user_id)
+        if account_id is not None:
+            stmt = stmt.where(LogicalExecution.account_id == account_id)
+        rows = await self.session.execute(stmt)
         scalars = rows.scalars()
         if isawaitable(scalars):
             scalars = await scalars
@@ -181,7 +203,7 @@ class ExecutionRepository:
         if isawaitable(candidates):
             candidates = await candidates
         candidates = list(candidates)
-        return [ex for ex in candidates if (ex.symbol, ex.conid) in contracts]
+        return [ex for ex in candidates if (ex.symbol, ex.conid, str(ex.asset_class)) in contracts]
 
     async def list_active_execution_contract_refs_by_trade_ids(
         self,
@@ -196,6 +218,7 @@ class ExecutionRepository:
                 LogicalExecution.symbol,
                 LogicalExecution.conid,
                 LogicalExecution.trade_id,
+                LogicalExecution.asset_class,
             )
             .where(
                 LogicalExecution.trade_id.in_(trade_ids),
@@ -208,7 +231,7 @@ class ExecutionRepository:
         rows = result.all()
         if isawaitable(rows):
             rows = await rows
-        for execution_id, symbol, conid, trade_id in rows:
+        for execution_id, symbol, conid, trade_id, asset_class in rows:
             if trade_id is None:
                 continue
             refs.append(
@@ -217,6 +240,7 @@ class ExecutionRepository:
                     symbol=symbol,
                     conid=conid,
                     trade_id=trade_id,
+                    asset_class=asset_class,
                 )
             )
         return refs
@@ -232,7 +256,7 @@ class ExecutionRepository:
         - at least one non-deleted manual leg with ``source_id IS NULL``, and
         - at least one non-deleted non-manual leg.
 
-        The returned rows are contract refs (symbol/conid) plus owning trade_id,
+        The returned rows are symbol/conid/asset refs plus owning trade_id,
         scoped to the given user/account.
         """
         base_leg = aliased(LogicalExecution)
@@ -260,6 +284,7 @@ class ExecutionRepository:
                 base_leg.trade_id,
                 base_leg.symbol,
                 base_leg.conid,
+                base_leg.asset_class,
             )
             .where(
                 base_leg.user_id == user_id,
@@ -278,7 +303,7 @@ class ExecutionRepository:
             rows = await rows
 
         refs: list[TradeContractRef] = []
-        for trade_id, symbol, conid in rows:
+        for trade_id, symbol, conid, asset_class in rows:
             if trade_id is None:
                 continue
             refs.append(
@@ -286,6 +311,7 @@ class ExecutionRepository:
                     trade_id=trade_id,
                     symbol=symbol,
                     conid=conid,
+                    asset_class=asset_class,
                 )
             )
         return refs
@@ -343,6 +369,7 @@ class ExecutionRepository:
                     unlinked.account_id == protected_leg.account_id,
                     unlinked.symbol == protected_leg.symbol,
                     unlinked.conid.is_not_distinct_from(protected_leg.conid),
+                    unlinked.asset_class == protected_leg.asset_class,
                 ),
             )
             .where(
@@ -381,7 +408,9 @@ class ExecutionRepository:
                 unlinked.trade_id.is_(None),
                 unlinked.deleted.is_(False),
                 unlinked.symbol == linked.symbol,
-                unlinked.conid == linked.conid,
+                unlinked.conid.is_not_distinct_from(linked.conid),
+                unlinked.asset_class == linked.asset_class,
+                unlinked.account_id.is_not_distinct_from(linked.account_id),
             )
             .limit(1)
         )

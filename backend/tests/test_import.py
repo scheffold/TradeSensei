@@ -27,6 +27,7 @@ import pytest
 from app.core.exceptions import AccountNotFoundError, ImportParseError
 from app.models.trade import Trade
 from app.models.trade import AssetClass, Direction
+from app.repositories.execution import ExecutionContractRef
 from app.schemas.corporate_action import CorporateActionCreateRequest
 from app.schemas.imports import ImportResult
 from app.schemas.trade import TradeCreate
@@ -801,7 +802,9 @@ class TestImportService:
         mock_parser.warnings = []
         mock_parser.enrich_pnl_eur = AsyncMock(return_value=None)
 
-        manually_edited = {(incoming_skipped.broker_conid, incoming_skipped.opened_at)}
+        manually_edited = {
+            (account_id, incoming_skipped.symbol, incoming_skipped.asset_class, incoming_skipped.broker_conid, incoming_skipped.opened_at)
+        }
 
         with ExitStack() as stack:
             common_async_patches = [
@@ -989,6 +992,7 @@ class TestImportService:
         unlinked_execution = MagicMock()
         unlinked_execution.symbol = "PROTUL"
         unlinked_execution.conid = "555555"
+        unlinked_execution.asset_class = AssetClass.EQUITY
         unlinked_execution.executed_at = now.replace(hour=11)
 
         mock_parser = MagicMock()
@@ -1053,25 +1057,27 @@ class TestImportService:
                     new_callable=AsyncMock,
                     side_effect=[
                         [
-                            MagicMock(
+                            ExecutionContractRef(
                                 execution_id=uuid.uuid4(),
                                 symbol="PROTUL",
                                 conid="555555",
                                 trade_id=protected_trade.id,
+                                asset_class=AssetClass.EQUITY,
                             )
                         ],
                         [
-                            MagicMock(
+                            ExecutionContractRef(
                                 execution_id=uuid.uuid4(),
                                 symbol="PROTUL",
                                 conid="555555",
                                 trade_id=protected_trade.id,
+                                asset_class=AssetClass.EQUITY,
                             )
                         ],
                     ],
                 )
             )
-            stack.enter_context(
+            unlinked_lookup = stack.enter_context(
                 patch(
                     "app.services.import_service.ExecutionRepository.list_unlinked_by_source_ids_for_contracts",
                     new_callable=AsyncMock,
@@ -1110,6 +1116,12 @@ class TestImportService:
             )
 
         assert result.unlinked_executions == 1
+        unlinked_lookup.assert_any_await(
+            source_ids=[stamped_raw.id],
+            contracts={("PROTUL", "555555", str(AssetClass.EQUITY))},
+            user_id=user_id,
+            account_id=account_id,
+        )
         assert any("protected_unlinked_execution" in warning for warning in result.warnings)
 
     @pytest.mark.unit
@@ -1744,6 +1756,7 @@ class TestImportWithSplit:
           difference between parsed and created + manually-edited.
         """
         fake_account = MagicMock()
+        account_id = uuid.uuid4()
         now = datetime.now(tz=UTC)
 
         # Two trades; the second will be in the manually-edited set.
@@ -1759,8 +1772,8 @@ class TestImportWithSplit:
         )
 
         # The key for trade_b is in the manually-edited set.
-        manually_edited: set[tuple[str | None, datetime]] = {
-            ("357194941", now),
+        manually_edited: set[tuple[uuid.UUID | None, str, AssetClass, str | None, datetime]] = {
+            (account_id, trade_b.symbol, trade_b.asset_class, trade_b.broker_conid, now),
         }
 
         mock_parser = MagicMock()
@@ -1814,7 +1827,7 @@ class TestImportWithSplit:
                 filename="activity.csv",
                 broker=BrokerType.IBKR,
                 portfolio_id=TEST_PORTFOLIO_ID,
-                account_id=uuid.uuid4(),
+                account_id=account_id,
                 user_id=uuid.uuid4(),
             )
 

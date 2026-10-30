@@ -42,7 +42,7 @@ from app.models.logical_execution import (
     LogicalExecution,
 )
 from app.models.portfolio import Portfolio
-from app.models.trade import Trade
+from app.models.trade import AssetClass, Trade
 from app.models.trade_annotation import TradeAnnotation
 from app.models.trade_taxonomy import TradeTaxonomy
 from app.schemas.trade import (
@@ -53,6 +53,9 @@ from app.schemas.trade import (
     TradeSortParams,
     TradeUpdate,
 )
+
+type TradeProtectionKey = tuple[uuid.UUID | None, str, AssetClass | None, str | None, datetime]
+"""Account, symbol, asset class, contract ID and opening time of one position."""
 
 
 def _get_cursor_secret() -> str:
@@ -1269,6 +1272,7 @@ class TradeRepository:
         self,
         user_id: uuid.UUID,
         portfolio_id: uuid.UUID | None = None,
+        account_id: uuid.UUID | None = None,
     ) -> list[Trade]:
         """Return all open (unclosed) trades owned by *user_id*.
 
@@ -1278,12 +1282,16 @@ class TradeRepository:
 
         Args:
             user_id: UUID of the owning user.
+            portfolio_id: Optional portfolio ownership scope.
+            account_id: Optional target account; None keeps the legacy scope.
 
         Returns:
             A list of :class:`Trade` ORM instances (no eager loads — only
             the scalar columns needed by the aggregator are used).
         """
         stmt = select(Trade).where(Trade.user_id == user_id, Trade.closed_at.is_(None)).order_by(Trade.opened_at.asc())
+        if account_id is not None:
+            stmt = stmt.where(Trade.account_id == account_id)
         if portfolio_id is not None:
             stmt = (
                 stmt.join(Account, Trade.account_id == Account.id)
@@ -1338,6 +1346,7 @@ class TradeRepository:
         self,
         user_id: uuid.UUID,
         portfolio_id: uuid.UUID | None = None,
+        account_id: uuid.UUID | None = None,
     ) -> list[Trade]:
         """Return all orphaned trades owned by *user_id*.
 
@@ -1347,6 +1356,8 @@ class TradeRepository:
 
         Args:
             user_id: UUID of the owning user.
+            portfolio_id: Optional portfolio ownership scope.
+            account_id: Optional target account; None keeps the legacy scope.
 
         Returns:
             A list of :class:`Trade` ORM instances.
@@ -1360,6 +1371,8 @@ class TradeRepository:
             )
             .order_by(Trade.opened_at.asc())
         )
+        if account_id is not None:
+            stmt = stmt.where(Trade.account_id == account_id)
         if portfolio_id is not None:
             stmt = (
                 stmt.join(Account, Trade.account_id == Account.id)
@@ -1514,25 +1527,28 @@ class TradeRepository:
         self,
         user_id: uuid.UUID,
         portfolio_id: uuid.UUID | None = None,
-    ) -> set[tuple[str | None, datetime]]:
-        """Return a set of ``(broker_conid, opened_at)`` tuples for all manually
-        edited trades owned by *user_id*.
+        account_id: uuid.UUID | None = None,
+    ) -> set[TradeProtectionKey]:
+        """Return complete business identities for manually edited trades.
 
         This set is used by :class:`~app.services.import_service.ImportService`
         to skip re-importing trades that the user has manually corrected.
 
         Args:
             user_id: UUID of the owning user.
+            portfolio_id: Optional portfolio ownership scope.
+            account_id: Optional target account; None keeps the legacy scope.
 
         Returns:
-            A :class:`set` of ``(broker_conid, opened_at)`` tuples where
-            ``broker_conid`` may be ``None`` for trades without a broker
-            contract identifier.
+            Account/symbol/asset/contract/time keys. Nullable contract IDs must
+            not cause different instruments at one timestamp to collide.
         """
-        stmt = select(Trade.broker_conid, Trade.opened_at).where(
+        stmt = select(Trade.account_id, Trade.symbol, Trade.asset_class, Trade.broker_conid, Trade.opened_at).where(
             Trade.user_id == user_id,
             Trade.is_manually_edited.is_(True),
         )
+        if account_id is not None:
+            stmt = stmt.where(Trade.account_id == account_id)
         if portfolio_id is not None:
             stmt = (
                 stmt.join(Account, Trade.account_id == Account.id)
@@ -1543,4 +1559,4 @@ class TradeRepository:
                 )
             )
         result = await self._session.execute(stmt)
-        return {(row.broker_conid, row.opened_at) for row in result}
+        return {(row.account_id, row.symbol, row.asset_class, row.broker_conid, row.opened_at) for row in result}

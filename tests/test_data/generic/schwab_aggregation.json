@@ -1,0 +1,100 @@
+{
+  "schema_version": "1",
+  "executions": [
+    {
+      "execution_id": "123689628930",
+      "executed_at": "2026-06-30T18:42:11Z",
+      "symbol": "MRVL",
+      "asset_class": "EQUITY",
+      "side": "BUY",
+      "quantity": "10.0",
+      "price": "297.26",
+      "currency": "USD",
+      "commission": "0.0",
+      "open_close": "OPEN",
+      "multiplier": 1
+    },
+    {
+      "execution_id": "123987433325",
+      "executed_at": "2026-07-02T17:35:33Z",
+      "symbol": "MRVL",
+      "asset_class": "EQUITY",
+      "side": "SELL",
+      "quantity": "10.0",
+      "price": "242.01",
+      "currency": "USD",
+      "commission": "0.05",
+      "open_close": "CLOSE",
+      "multiplier": 1,
+      "realized_pnl": "0"
+    },
+    {
+      "execution_id": "124694896745",
+      "executed_at": "2026-07-10T14:32:58Z",
+      "symbol": "LOGI",
+      "asset_class": "EQUITY",
+      "side": "BUY",
+      "quantity": "10.0",
+      "price": "101.8",
+      "currency": "USD",
+      "commission": "0.0",
+      "open_close": "OPEN",
+      "multiplier": 1
+    },
+    {
+      "execution_id": "124780687237",
+      "executed_at": "2026-07-10T19:15:35Z",
+      "symbol": "AMZN",
+      "asset_class": "EQUITY",
+      "side": "BUY",
+      "quantity": "10.0",
+      "price": "245.46",
+      "currency": "USD",
+      "commission": "0.0",
+      "open_close": "OPEN",
+      "multiplier": 1
+    },
+    {
+      "execution_id": "124780699999",
+      "executed_at": "2026-07-11T15:10:35Z",
+      "symbol": "AMZN",
+      "asset_class": "EQUITY",
+      "side": "SELL",
+      "quantity": "10.0",
+      "price": "249.0",
+      "currency": "USD",
+      "commission": "0.02",
+      "open_close": "CLOSE",
+      "multiplier": 1,
+      "realized_pnl": "0"
+    },
+    {
+      "execution_id": "124780800001",
+      "executed_at": "2026-07-11T16:20:00Z",
+      "symbol": "AAPL",
+      "asset_class": "EQUITY",
+      "side": "SELL",
+      "quantity": "5.0",
+      "price": "186.0",
+      "currency": "USD",
+      "commission": "0.0",
+      "open_close": "OPEN",
+      "multiplier": 1
+    },
+    {
+      "execution_id": "124780800002",
+      "executed_at": "2026-07-12T16:20:00Z",
+      "symbol": "AAPL",
+      "asset_class": "EQUITY",
+      "side": "BUY",
+      "quantity": "5.0",
+      "price": "182.0",
+      "currency": "USD",
+      "commission": "0.0",
+      "open_close": "CLOSE",
+      "multiplier": 1,
+      "realized_pnl": "0"
+    }
+  ],
+  "corporate_actions": []
+}

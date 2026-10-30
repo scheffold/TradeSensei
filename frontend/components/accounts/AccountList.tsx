@@ -35,6 +35,11 @@ const TYPE_BADGE: Record<AccountType, { label: string; className: string }> = {
     className:
       "bg-secondary text-muted-foreground border border-border",
   },
+  generic: {
+    label: "Other broker (CSV/JSON)",
+    className:
+      "bg-secondary text-foreground border border-border",
+  },
   schwab: {
     label: "Schwab",
     className:

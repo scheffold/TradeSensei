@@ -36,15 +36,17 @@ const BROKER_TYPE_LABELS: Record<string, string> = {
   ibkr: "IBKR",
   schwab: "Schwab",
   manual: "Manual",
+  generic: "Other broker (CSV/JSON)",
 };
 
 const BROKER_TYPE_BADGES: Record<string, string> = {
   ibkr: "bg-[color-mix(in_srgb,var(--primary)_10%,transparent)] text-primary border border-[color-mix(in_srgb,var(--primary)_20%,transparent)]",
   schwab: "bg-[color-mix(in_srgb,var(--primary)_10%,transparent)] text-primary border border-[color-mix(in_srgb,var(--primary)_20%,transparent)]",
   manual: "bg-secondary text-muted-foreground border border-border",
+  generic: "bg-secondary text-foreground border border-border",
 };
 
-const CREDENTIAL_FIELDS: Record<Exclude<AccountType, "manual">, { key: string; label: string }[]> = {
+const CREDENTIAL_FIELDS: Record<Extract<AccountType, "ibkr" | "schwab">, { key: string; label: string }[]> = {
   schwab: [
     { key: "schwab_app_key", label: "App Key" },
     { key: "schwab_app_secret", label: "App Secret" },
@@ -90,7 +92,7 @@ export function BrokerAccountEditModal({ account, onClose }: Props) {
 
   useEffect(() => {
     let cancelled = false;
-    if (!portfolioId || account.type === "manual") {
+    if (!portfolioId || (account.type !== "ibkr" && account.type !== "schwab")) {
       setCredentials({});
       return;
     }
@@ -131,7 +133,7 @@ export function BrokerAccountEditModal({ account, onClose }: Props) {
         name: name.trim(),
         account_number: accountNumber.trim() || null,
       };
-      if (Object.keys(filledCredentials).length > 0) {
+      if ((account.type === "ibkr" || account.type === "schwab") && Object.keys(filledCredentials).length > 0) {
         payload.properties = filledCredentials;
       }
 
@@ -185,16 +187,15 @@ export function BrokerAccountEditModal({ account, onClose }: Props) {
   };
 
   const handleTestConnection = async () => {
+    if (account.type !== "ibkr" && account.type !== "schwab") return;
     setTesting(true);
     setTestResult(null);
     setTestMessage("");
 
     try {
-      const credValues = account.type !== "manual"
-        ? Object.fromEntries(
-            Object.entries(credentials).filter(([, v]) => v.trim() !== "")
-          )
-        : {};
+      const credValues = Object.fromEntries(
+        Object.entries(credentials).filter(([, v]) => v.trim() !== "")
+      );
 
       const { error: testErr } = await client.post<unknown, unknown, false>({
         url: `/api/v1/portfolios/${portfolioId}/accounts/test-connection`,
@@ -268,7 +269,7 @@ export function BrokerAccountEditModal({ account, onClose }: Props) {
 
 
 
-  const credentialFields = account.type !== "manual" ? CREDENTIAL_FIELDS[account.type] : null;
+  const credentialFields = account.type === "ibkr" || account.type === "schwab" ? CREDENTIAL_FIELDS[account.type] : null;
   const brokerBadge = BROKER_TYPE_BADGES[account.type] || BROKER_TYPE_BADGES.manual;
   const canSubmit = name.trim().length > 0 && !updateMutation.isPending;
   const canDelete = confirmName.trim() === account.name && !deleteMutation.isPending;
@@ -400,6 +401,12 @@ export function BrokerAccountEditModal({ account, onClose }: Props) {
 
           {account.type === "schwab" && <SchwabConnectSection account={account} />}
 
+          {account.type === "generic" && (
+            <p className="border border-border rounded-lg p-4 text-xs text-foreground">
+              Upload generic CSV or JSON files on the Import page. This account does not use credentials or API sync.
+            </p>
+          )}
+
           <div className="border-t border-border pt-4 space-y-2">
             <p className="text-xs font-semibold text-muted-foreground">Status</p>
             {isActive ? (
@@ -416,7 +423,11 @@ export function BrokerAccountEditModal({ account, onClose }: Props) {
                 >
                   {togglingActive ? "Deactivating..." : "Deactivate Account"}
                 </button>
-                <p className="text-xs text-muted-foreground">Stops data sync, but retains all historical trades</p>
+                <p className={`text-xs ${account.type === "generic" ? "text-foreground" : "text-muted-foreground"}`}>
+                  {account.type === "generic"
+                    ? "Hides this account from imports, but retains all historical trades"
+                    : "Stops data sync, but retains all historical trades"}
+                </p>
               </div>
             ) : (
               <div className="space-y-2">

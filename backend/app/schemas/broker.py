@@ -101,18 +101,22 @@ class BrokerSyncResult(BaseModel):
     warnings: list[str] = Field(
         default_factory=list,
         description="Informational or warning messages.",
+        examples=[[]],
     )
     trades_protected_reconciled: int = Field(
         default=0,
         description="Number of metadata-protected trades that absorbed new executions.",
+        examples=[0, 1],
     )
     trades_protected_skipped: int = Field(
         default=0,
         description="Number of metadata-protected positions skipped.",
+        examples=[0, 1],
     )
     activity_log: list[str] = Field(
         default_factory=list,
         description=("Informational log of routine, successful row-level outcomes ('created:'/'updated:'/'skipped:' lines). Not an error or warning signal."),
+        examples=[[]],
     )
 
 
@@ -128,16 +132,21 @@ class BrokerConnectionTestRequest(BaseModel):
 
     type: Literal["schwab", "ibkr"] = Field(
         ...,
-        description="Broker type to validate. Only 'schwab' and 'ibkr' support connection tests.",
+        description="Broker type to validate. Only 'schwab' and 'ibkr' support connection tests; 'generic' and 'manual' fail request validation with HTTP 422.",
         examples=["ibkr", "schwab"],
     )
     properties: dict[str, str] | None = Field(
         default=None,
         description=("Optional plaintext credential overrides keyed by provider field name (e.g. IBKR_FLEX_TOKEN)."),
+        examples=[{"IBKR_FLEX_TOKEN": "example-token-not-a-real-credential", "IBKR_FLEX_QUERY_ID": "123456"}, None],
     )
     account_id: uuid.UUID | None = Field(
         default=None,
-        description="Optional account ID to use stored encrypted credentials for missing fields.",
+        description=(
+            "Optional account ID in the owned path portfolio, used to load stored credentials for missing fields. "
+            "Referencing an existing generic account returns HTTP 400, even when type is 'ibkr' or 'schwab'."
+        ),
+        examples=["3fa85f64-5717-4562-b3fc-2c963f66afa6", None],
     )
 
 

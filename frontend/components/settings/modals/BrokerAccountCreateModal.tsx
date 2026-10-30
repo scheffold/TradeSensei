@@ -29,9 +29,10 @@ const BROKER_TYPE_OPTIONS: { value: AccountType; label: string }[] = [
   { value: "manual", label: "Manual" },
   { value: "schwab", label: "Charles Schwab" },
   { value: "ibkr", label: "Interactive Brokers (IBKR)" },
+  { value: "generic", label: "Other broker (CSV/JSON)" },
 ];
 
-const CREDENTIAL_FIELDS: Record<Exclude<AccountType, "manual">, { key: string; label: string }[]> = {
+const CREDENTIAL_FIELDS: Record<Extract<AccountType, "ibkr" | "schwab">, { key: string; label: string }[]> = {
   schwab: [
     { key: "schwab_app_key", label: "App Key" },
     { key: "schwab_app_secret", label: "App Secret" },
@@ -71,7 +72,9 @@ export function BrokerAccountCreateModal({ portfolioId, portfolioName, onClose }
       const filledCredentials = Object.fromEntries(
         Object.entries(credentials).filter(([, v]) => v.trim() !== "")
       );
-      const properties = Object.keys(filledCredentials).length > 0 ? filledCredentials : null;
+      const properties = (type === "ibkr" || type === "schwab") && Object.keys(filledCredentials).length > 0
+        ? filledCredentials
+        : null;
 
       const payload: AccountCreate = {
         name: name.trim(),
@@ -79,7 +82,7 @@ export function BrokerAccountCreateModal({ portfolioId, portfolioName, onClose }
         type,
         properties,
         portfolio_id: portfolioId,
-        settings: {
+        settings: type === "generic" ? undefined : {
           sync_days: 30,
           flex_from_date_preset: "ytd" as const,
           flex_custom_from_date: syncStartDate.replace(/-/g, ""),
@@ -109,16 +112,15 @@ export function BrokerAccountCreateModal({ portfolioId, portfolioName, onClose }
   };
 
   const handleTestConnection = async () => {
+    if (type !== "ibkr" && type !== "schwab") return;
     setTesting(true);
     setTestResult(null);
     setTestMessage("");
 
     try {
-      const credValues = type !== "manual"
-        ? Object.fromEntries(
-            Object.entries(credentials).filter(([, v]) => v.trim() !== "")
-          )
-        : {};
+      const credValues = Object.fromEntries(
+        Object.entries(credentials).filter(([, v]) => v.trim() !== "")
+      );
 
       const { error: testErr } = await client.post<unknown, unknown, false>({
         url: `/api/v1/portfolios/${portfolioId}/accounts/test-connection`,
@@ -156,7 +158,7 @@ export function BrokerAccountCreateModal({ portfolioId, portfolioName, onClose }
     createMutation.mutate();
   };
 
-  const credentialFields = type !== "manual" ? CREDENTIAL_FIELDS[type] : null;
+  const credentialFields = type === "ibkr" || type === "schwab" ? CREDENTIAL_FIELDS[type] : null;
   const canSubmit = name.trim().length > 0 && !createMutation.isPending;
 
   return (
@@ -203,7 +205,8 @@ export function BrokerAccountCreateModal({ portfolioId, portfolioName, onClose }
               id={`${uid}-type`}
               value={type}
               onChange={(e) => {
-                setType(e.target.value as AccountType);
+                const selectedType = BROKER_TYPE_OPTIONS.find((option) => option.value === e.target.value);
+                if (selectedType) setType(selectedType.value);
                 setCredentials({});
               }}
               className={INPUT_CLASS}
@@ -309,22 +312,30 @@ export function BrokerAccountCreateModal({ portfolioId, portfolioName, onClose }
             </div>
           )}
 
-          <div className="border border-border rounded-lg p-4 space-y-3">
-            <p className="text-xs font-semibold text-muted-foreground">Import Settings</p>
-            <div>
-              <label htmlFor={`${uid}-sync-date`} className={LABEL_CLASS}>
-                Sync Start Date
-              </label>
-              <input
-                id={`${uid}-sync-date`}
-                type="date"
-                value={syncStartDate}
-                onChange={(e) => setSyncStartDate(e.target.value)}
-                className={INPUT_CLASS}
-                data-testid="sync-start-date"
-              />
+          {type === "generic" && (
+            <p className="border border-border rounded-lg p-4 text-xs text-foreground">
+              Upload generic CSV or JSON files on the Import page. This account does not use credentials or API sync.
+            </p>
+          )}
+
+          {type !== "generic" && (
+            <div className="border border-border rounded-lg p-4 space-y-3">
+              <p className="text-xs font-semibold text-muted-foreground">Import Settings</p>
+              <div>
+                <label htmlFor={`${uid}-sync-date`} className={LABEL_CLASS}>
+                  Sync Start Date
+                </label>
+                <input
+                  id={`${uid}-sync-date`}
+                  type="date"
+                  value={syncStartDate}
+                  onChange={(e) => setSyncStartDate(e.target.value)}
+                  className={INPUT_CLASS}
+                  data-testid="sync-start-date"
+                />
+              </div>
             </div>
-          </div>
+          )}
 
           {error && (
             <p className="text-sm text-danger bg-danger/10 border border-danger/20 rounded-md px-3 py-2" data-testid="create-account-error">

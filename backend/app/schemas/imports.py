@@ -17,6 +17,60 @@ import uuid
 
 from pydantic import BaseModel, Field
 
+from app.core.constants import GENERIC_IMPORT_MAX_ERRORS
+
+
+class GenericImportRowError(BaseModel):
+    """One safe generic validation error, or the final truncation marker."""
+
+    location: int | str = Field(
+        description=(
+            "Physical CSV line number including the header, a zero-based JSON array location, "
+            "or 'document' for document-level errors and the truncation marker."
+        ),
+        examples=[2, "executions[0]", "corporate_actions[1]", "document"],
+    )
+    field: str = Field(
+        description="Invalid field name, or a document-level field such as header, encoding or record. The truncation marker uses 'errors'.",
+        examples=["executed_at", "instrument_id", "errors"],
+    )
+    message: str = Field(
+        description="Validation rule explanation naming the field without echoing supplied values, or a count of omitted errors.",
+        examples=["executed_at requires an explicit timezone offset or Z.", "2 more validation errors omitted."],
+    )
+
+
+class GenericImportValidationDetail(BaseModel):
+    """Structured HTTP 400 detail for file validation or persisted order-marker conflicts."""
+
+    message: str = Field(description="Safe summary of the generic validation failure.", examples=["Generic import validation failed."])
+    errors: list[GenericImportRowError] = Field(
+        max_length=GENERIC_IMPORT_MAX_ERRORS + 1,
+        description=(
+            f"At most {GENERIC_IMPORT_MAX_ERRORS} row errors. If more errors exist, a final location='document', field='errors' "
+            f"marker states how many were omitted, making at most {GENERIC_IMPORT_MAX_ERRORS + 1} entries including the marker."
+        ),
+        examples=[[{"location": 2, "field": "execution_id", "message": "execution_id is required."}]],
+    )
+
+
+class ImportBadRequestResponse(BaseModel):
+    """Documentation-only schema for existing import HTTP 400 response bodies."""
+
+    detail: str | GenericImportValidationDetail = Field(
+        description=(
+            "Legacy string detail for parse/processing errors or an unacknowledged fresh-start; "
+            "generic validation and persisted order-marker conflicts instead return a message and bounded safe field errors. No response envelope is used."
+        ),
+        examples=[
+            "Generic import supports CSV and JSON only; XML is not supported.",
+            {
+                "message": "Generic import validation failed.",
+                "errors": [{"location": "executions[0]", "field": "execution_id", "message": "execution_id is required."}],
+            },
+        ],
+    )
+
 
 class FreshStartResult(BaseModel):
     """Result of a fresh-start import operation.
@@ -31,20 +85,24 @@ class FreshStartResult(BaseModel):
     account_id: uuid.UUID = Field(
         ...,
         description="UUID of the account that was reset.",
+        examples=["3fa85f64-5717-4562-b3fc-2c963f66afa6"],
     )
     executions_deleted: int = Field(
         ...,
         ge=0,
         description="Number of LogicalExecution rows deleted during reset.",
+        examples=[4, 0],
     )
     trades_deleted: int = Field(
         ...,
         ge=0,
         description="Number of Trade rows deleted during reset.",
+        examples=[2, 0],
     )
     import_result: "ImportResult" = Field(
         ...,
         description="Import result from the file processed after the reset.",
+        examples=[{"broker": "generic", "filename": "executions.csv", "trades_parsed": 1, "trades_created": 1, "trades_skipped": 0}],
     )
 
 
@@ -100,8 +158,8 @@ class ImportResult(BaseModel):
 
     broker: str = Field(
         ...,
-        description=("Broker identifier used for this import (e.g. 'ibkr', 'schwab')."),
-        examples=["ibkr", "schwab"],
+        description="Broker/parser identifier used for this import: 'ibkr', 'schwab' or 'generic'.",
+        examples=["ibkr", "schwab", "generic"],
     )
     filename: str = Field(
         ...,
@@ -145,7 +203,8 @@ class ImportResult(BaseModel):
         default=0,
         ge=0,
         description=(
-            "Number of raw broker transactions skipped because their ``suppressed`` flag is ``True``. These records are permanently excluded from all imports."
+            "Number of raw broker transactions skipped because their suppressed flag is true. "
+            "Ordinary re-imports honor suppression; destructive history resets delete the raw records and their suppression flags."
         ),
         examples=[0, 3],
     )
@@ -155,7 +214,7 @@ class ImportResult(BaseModel):
         description=(
             "Number of raw broker transactions skipped because their linked "
             "execution was previously deleted by the user (``deleted=True``). "
-            "Re-import will not recreate these executions."
+            "Ordinary re-import does not recreate them; a destructive reset clears this history."
         ),
         examples=[0, 1],
     )
@@ -189,9 +248,13 @@ class ImportResult(BaseModel):
     )
     warnings: list[str] = Field(
         default_factory=list,
-        description=("Human-readable descriptions of rows that were skipped during import. Empty when all rows were imported successfully."),
+        description=(
+            "Non-fatal import warnings, including skipped rows and ignored generic CSV columns. "
+            "Invalid generic rows reject the whole file with HTTP 400 rather than appearing as skipped-row warnings."
+        ),
         examples=[
             ["IBKR row 3: skipped — Row has only 5 columns; expected at least 16."],
+            ["Unknown CSV column ignored: broker_note."],
             [],
         ],
     )
@@ -229,7 +292,10 @@ class FlexImportRequest(BaseModel):
     )
     account_id: uuid.UUID | None = Field(
         default=None,
-        description=("UUID of the broker account to associate imported trades with. Omit to create trades without an account association."),
+        description=(
+            "UUID of the broker account to associate imported trades with; generic accounts are rejected because they support file imports only. "
+            "The account_id query parameter takes precedence. Omit both to create trades without an account association."
+        ),
         examples=["3fa85f64-5717-4562-b3fc-2c963f66afa6", None],
     )
     from_date: str | None = Field(
@@ -241,4 +307,5 @@ class FlexImportRequest(BaseModel):
     overwrite_manually_edited: bool = Field(
         default=False,
         description=("When true, trades that have been manually edited are no longer protected and will be overwritten by the incoming import data."),
+        examples=[False, True],
     )

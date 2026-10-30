@@ -183,7 +183,8 @@ async def test_import_trades_skips_manually_edited_trades():
     svc._trade_repo.list_orphaned_lots_by_user = AsyncMock(return_value=[])
 
     trade = _make_mock_trade_create()
-    match_key = (trade.broker_conid, trade.opened_at)
+    trade.asset_class = "EQUITY"
+    match_key = (None, trade.symbol, trade.asset_class, trade.broker_conid, trade.opened_at)
     svc._trade_repo.list_manually_edited_keys = AsyncMock(return_value={match_key})
     svc._trade_repo.list_existing_entry_keys = AsyncMock(return_value=set())
     svc._trade_repo.list_existing_close_keys = AsyncMock(return_value=set())
@@ -323,4 +324,3 @@ async def test_process_execution_split_with_changes():
     
     svc._exec_repo.soft_delete.assert_called_once()
     svc._exec_repo.create.assert_called()
-

@@ -172,7 +172,7 @@ def _derive_combo_direction(opening_net_cash: Decimal) -> Direction:
 
 def build_combo_positions(
     executions: Sequence[TradeCreate],
-    protected_contracts: set[tuple[str, str | None]] | None = None,
+    protected_contracts: set[tuple[str, str | None, str]] | None = None,
 ) -> ComboBuildResult:
     """Build COMBO trades from enriched execution rows.
 
@@ -188,7 +188,7 @@ def build_combo_positions(
 
     Args:
         executions: Combo-eligible and non-combo executions to process.
-        protected_contracts: ``(symbol, conid)`` pairs held by a *closed*
+        protected_contracts: ``(symbol, conid, asset_class)`` lot identities held by a *closed*
             metadata-protected trade (see ``ProtectedExecutionSnapshot``).
             A close order whose every leg's contract is in this set has no
             open counterpart *by design* — its opening legs were excluded
@@ -319,7 +319,9 @@ def build_combo_positions(
         ]
         expected_sets = [set(position.contract_set) for position in same_symbol_open]
         received_set = set(contract_set)
-        is_protected_residue = protected_contracts is not None and all((symbol, conid) in protected_contracts for conid in contract_set)
+        is_protected_residue = protected_contracts is not None and all(
+            (leg.symbol, leg.broker_conid, str(leg.asset_class)) in protected_contracts for leg in group.legs
+        )
         if is_protected_residue:
             logger.debug(
                 "combo_close_matches_protected_trade order_id=%s symbol=%s conids=%s",
@@ -600,7 +602,7 @@ def aggregate_executions_fifo(
     symbol_map: dict[str, str] | None = None,
     conid_map: dict[str, str] | None = None,
     corporate_actions: Sequence[CorporateActionLike] | None = None,
-    protected_contracts: set[tuple[str, str | None]] | None = None,
+    protected_contracts: set[tuple[str, str | None, str]] | None = None,
 ) -> list[TradeCreate]:
     """Group execution-level TradeCreate objects into round-trip TradeCreate objects.
 
@@ -702,7 +704,7 @@ def aggregate_executions_fifo(
                 )
                 queue.append(stored_trade)
             else:
-                if protected_contracts and (symbol, conid) in protected_contracts:
+                if protected_contracts and key in protected_contracts:
                     logger.warning(
                         "suppressed_orphan_lot_for_protected_contract symbol=%s conid=%s executed_at=%s",
                         symbol,
@@ -746,12 +748,9 @@ def aggregate_executions_fifo(
         if exec_trade.pnl is not None and total_open_qty > 0 and exec_qty_remaining > total_open_qty * Decimal("2"):
             logger.warning(
                 "Possible unregistered split for symbol '%s': "
-                "closing execution quantity "
-                "(%s) is more than 2x the open lot quantity (%s). "
+                "closing execution quantity exceeds the open-lot discrepancy threshold. "
                 "Consider adding a Corporate Action for this symbol.",
                 symbol,
-                exec_qty_remaining,
-                total_open_qty,
             )
 
         while exec_qty_remaining > Decimal("0") and queue:
@@ -834,7 +833,7 @@ def aggregate_executions_fifo(
         # or it's an orphaned closing quantity.
         if exec_qty_remaining > Decimal("0"):
             if is_closing_leg and not getattr(exec_trade, "is_mixed_execution", False):
-                if protected_contracts and (symbol, conid) in protected_contracts:
+                if protected_contracts and key in protected_contracts:
                     logger.warning(
                         "suppressed_orphan_remainder_for_protected_contract symbol=%s conid=%s executed_at=%s",
                         symbol,
@@ -1004,7 +1003,7 @@ def aggregate_executions_fifo_with_sources(
     symbol_map: dict[str, str] | None = None,
     conid_map: dict[str, str] | None = None,
     corporate_actions: Sequence[CorporateActionLike] | None = None,
-    protected_contracts: set[tuple[str, str | None]] | None = None,
+    protected_contracts: set[tuple[str, str | None, str]] | None = None,
 ) -> list[TradeCreateWithSources]:
     """Enhanced aggregation that tracks source executions for split-aware linking.
 

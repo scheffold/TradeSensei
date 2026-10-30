@@ -25,6 +25,8 @@ import { useEffect, useRef, useState } from "react";
 import { ChevronUp } from "lucide-react";
 import { MarkdownRenderer } from "../../components/notes/MarkdownRenderer";
 import { Logo } from "../../components/ui/Logo";
+import { useGenericImportDownload } from "@/hooks/useGenericImportDownload";
+import { extractApiError } from "@/lib/apiErrors";
 import type { HelpSection as Section, HelpEntry as MetricEntry } from "@/lib/help-content";
 
 // ─── MetricCard ───────────────────────────────────────────────────────────────
@@ -36,8 +38,9 @@ function MetricCard({ entry }: { entry: MetricEntry }) {
       className="scroll-mt-6 rounded-xl border border-border bg-card p-6 flex flex-col gap-3"
     >
       <h3 className="text-base font-semibold text-foreground">{entry.label}</h3>
-      <p className="text-sm font-medium text-muted-foreground">{entry.summary}</p>
+      <p className={`text-sm font-medium ${entry.id.startsWith("generic-") ? "text-foreground" : "text-muted-foreground"}`}>{entry.summary}</p>
       <MarkdownRenderer content={entry.detail} className="prose-pre:whitespace-pre-wrap prose-pre:break-words" />
+      {entry.id === "generic-import-format" && <GenericImportDownloads />}
 
       {entry.formula && (
         <div className="mt-1 rounded-md bg-muted px-4 py-2 font-mono text-xs text-foreground/70">
@@ -62,6 +65,34 @@ function MetricCard({ entry }: { entry: MetricEntry }) {
         </div>
       )}
     </section>
+  );
+}
+
+function GenericImportDownloads() {
+  const { mutate: download, isPending, variables, error } = useGenericImportDownload();
+  const linkClass = "rounded-sm text-foreground underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50";
+
+  return (
+    <div role="group" aria-label="Generic import downloads" className="space-y-2 text-sm">
+      <div className="flex flex-wrap gap-x-4 gap-y-2">
+        <button type="button" onClick={() => download("schema")} disabled={isPending} className={linkClass}>
+          Download JSON Schema
+        </button>
+        <button type="button" onClick={() => download("template")} disabled={isPending} className={linkClass}>
+          Download CSV template
+        </button>
+      </div>
+      {isPending && (
+        <p role="status" className="text-xs text-foreground">
+          {variables === "schema" ? "Downloading JSON Schema…" : "Downloading CSV template…"}
+        </p>
+      )}
+      {error != null && (
+        <p role="alert" className="text-xs text-foreground">
+          {extractApiError(error, "Download failed. Please try again.")}
+        </p>
+      )}
+    </div>
   );
 }
 
@@ -125,7 +156,7 @@ export function HelpClient({ sections, version }: Props) {
 
         {sections.map((section) => (
           <div key={section.heading} className="mb-3">
-            <p className="text-[9px] font-bold uppercase tracking-widest text-muted-foreground/50 px-2 mb-1">
+            <p className={`text-[9px] font-bold uppercase tracking-widest px-2 mb-1 ${section.heading === "Importing from other brokers" ? "text-foreground" : "text-muted-foreground/50"}`}>
               {section.heading}
             </p>
             {section.entries.map((entry) => {
@@ -137,6 +168,8 @@ export function HelpClient({ sections, version }: Props) {
                   className={`w-full text-left px-2 py-1 rounded text-xs transition-colors ${
                     isActive
                       ? "bg-muted text-foreground font-medium"
+                      : entry.id.startsWith("generic-")
+                      ? "text-foreground hover:text-foreground hover:bg-muted/50"
                       : "text-muted-foreground hover:text-foreground hover:bg-muted/50"
                   }`}
                 >
@@ -182,7 +215,7 @@ export function HelpClient({ sections, version }: Props) {
 
           {sections.map((section) => (
             <div key={section.heading} className="flex flex-col gap-4">
-              <h2 className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground px-1">
+              <h2 className={`text-[10px] font-bold uppercase tracking-widest px-1 ${section.heading === "Importing from other brokers" ? "text-foreground" : "text-muted-foreground"}`}>
                 {section.heading}
               </h2>
               {section.entries.map((entry) => (

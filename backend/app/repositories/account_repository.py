@@ -21,7 +21,7 @@ logic lives here.
 import uuid
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import exists, or_, select
 from sqlalchemy import update as sa_update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,7 +29,10 @@ from sqlalchemy.orm import selectinload
 
 from app.models.account import Account
 from app.models.account_property import AccountProperty
+from app.models.broker_raw_transaction import BrokerRawTransaction
+from app.models.logical_execution import LogicalExecution
 from app.models.portfolio import Portfolio
+from app.models.trade import Trade
 from app.schemas.account import (
     AccountCreate,
     AccountMetrics,
@@ -61,6 +64,8 @@ class AccountRepository:
         account_id: uuid.UUID,
         user_id: uuid.UUID,
         portfolio_id: uuid.UUID | None = None,
+        *,
+        for_update: bool = False,
     ) -> Account | None:
         """Retrieve a single account by primary key, scoped to a user.
 
@@ -71,6 +76,9 @@ class AccountRepository:
         Args:
             account_id: UUID of the account to fetch.
             user_id: UUID of the requesting user — enforces isolation.
+            portfolio_id: Optional portfolio ownership scope.
+            for_update: Lock and refresh the account until the caller's
+                transaction ends, including previously loaded relationships.
 
         Returns:
             The matching :class:`Account`, or ``None`` if not found or
@@ -90,6 +98,10 @@ class AccountRepository:
         )
         if portfolio_id is not None:
             stmt = stmt.where(Account.portfolio_id == portfolio_id)
+        if for_update:
+            # Lock only the account, not its joined portfolio. Refresh cached
+            # state after waiting so a concurrent type change cannot go unseen.
+            stmt = stmt.with_for_update(of=Account).execution_options(populate_existing=True)
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
@@ -98,17 +110,44 @@ class AccountRepository:
         account_id: uuid.UUID,
         user_id: uuid.UUID,
         portfolio_id: uuid.UUID | None = None,
+        *,
+        for_update: bool = False,
     ) -> Account | None:
         """Retrieve an account by ID with eagerly loaded properties.
 
         Args:
             account_id: UUID of the account to fetch.
             user_id: UUID of the requesting user.
+            portfolio_id: Optional portfolio ownership scope.
+            for_update: Lock and refresh account state and credentials.
 
         Returns:
             Matching account or ``None``.
         """
-        return await self.get_by_id(account_id, user_id, portfolio_id)
+        return await self.get_by_id(account_id, user_id, portfolio_id, for_update=for_update)
+
+    async def has_trading_history(self, account_id: uuid.UUID) -> bool:
+        """Return whether any raw, logical or trade rows reference an account.
+
+        Suppressed raw transactions and deleted logical executions still count.
+        Callers enforce ownership and acquire the account row lock before using
+        this result to decide whether an account type may change.
+
+        Args:
+            account_id: UUID of the already ownership-validated account.
+
+        Returns:
+            True when any trading-history layer contains a row for the account.
+        """
+        stmt = select(
+            or_(
+                exists().where(BrokerRawTransaction.account_id == account_id),
+                exists().where(LogicalExecution.account_id == account_id),
+                exists().where(Trade.account_id == account_id),
+            )
+        )
+        result = await self._session.execute(stmt)
+        return bool(result.scalar_one())
 
     async def list_by_user(
         self,

@@ -34,12 +34,14 @@ const BROKER_TYPE_LABELS: Record<string, string> = {
   ibkr: "IBKR",
   schwab: "Schwab",
   manual: "Manual",
+  generic: "Other broker (CSV/JSON)",
 };
 
 const BROKER_TYPE_BADGES: Record<string, string> = {
   ibkr: "bg-indigo-900/30 text-indigo-400 border border-indigo-800",
   schwab: "bg-blue-900/30 text-blue-400 border border-blue-800",
   manual: "bg-secondary text-muted-foreground border border-border",
+  generic: "bg-secondary text-foreground border border-border",
 };
 
 interface AccountRowProps {
@@ -51,7 +53,9 @@ interface AccountRowProps {
 function AccountRow({ account, portfolio, onEdit }: AccountRowProps) {
   const statusBadge = !account.is_active
     ? { label: "Inactive", className: "bg-secondary text-muted-foreground border border-border" }
-    : account.has_api_keys
+    : account.type === "generic"
+      ? { label: "File import", className: "bg-secondary text-foreground border border-border" }
+      : account.has_api_keys
       ? { label: "Connected", className: "bg-emerald-900/50 text-emerald-400 border border-emerald-800" }
       : { label: "Manual", className: "bg-amber-900/30 text-amber-400 border border-amber-800" };
 
@@ -59,10 +63,10 @@ function AccountRow({ account, portfolio, onEdit }: AccountRowProps) {
 
   return (
     <div className="flex items-center justify-between px-4 py-3 bg-muted/20 rounded-md border border-border/50">
-      <div className="flex items-center gap-3">
-        <span className="text-sm font-medium text-foreground">{account.name}</span>
+      <div className="flex min-w-0 flex-1 flex-wrap items-center gap-3">
+        <span className="min-w-0 break-words text-sm font-medium text-foreground">{account.name}</span>
         {account.account_number && (
-          <span className="text-xs text-muted-foreground font-mono bg-muted/50 px-1.5 py-0.5 rounded">
+          <span className="min-w-0 break-words text-xs text-muted-foreground font-mono bg-muted/50 px-1.5 py-0.5 rounded">
             {account.account_number}
           </span>
         )}
@@ -75,7 +79,8 @@ function AccountRow({ account, portfolio, onEdit }: AccountRowProps) {
       </div>
       <button
         onClick={() => onEdit(account)}
-        className="p-1.5 text-muted-foreground hover:text-foreground rounded-md hover:bg-muted/50 transition-colors"
+        aria-label={`Edit account ${account.name}`}
+        className="shrink-0 p-1.5 text-muted-foreground hover:text-foreground rounded-md hover:bg-muted/50 transition-colors"
       >
         <Edit2 className="h-4 w-4" />
       </button>

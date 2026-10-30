@@ -14,7 +14,7 @@
  */
 
 import React from "react";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { BrokerAccountCreateModal } from "@/components/settings/modals/BrokerAccountCreateModal";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { toast } from "react-hot-toast";
@@ -224,5 +224,125 @@ describe("BrokerAccountCreateModal", () => {
 
     fireEvent.click(screen.getByText("Cancel"));
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it("offers generic accounts without credentials, connection testing, or sync settings", () => {
+    renderComponent();
+
+    expect(screen.getByRole("option", { name: "Other broker (CSV/JSON)" })).toHaveValue("generic");
+    fireEvent.change(screen.getByRole("combobox", { name: "Broker Type" }), {
+      target: { value: "generic" },
+    });
+
+    expect(screen.getByText(/Upload generic CSV or JSON files on the Import page/)).toBeInTheDocument();
+    expect(screen.queryByText("API Credentials")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Flex Token")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("App Key")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Test Connection" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Sync Start Date")).not.toBeInTheDocument();
+    expect(screen.queryByText("Import Settings")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/currency/i)).not.toBeInTheDocument();
+    expect(clientGen.client.post).not.toHaveBeenCalled();
+  });
+
+  it("creates a generic account without carrying over native broker credentials or sync settings", async () => {
+    (api.createAccountApiV1PortfoliosPortfolioIdAccountsPost as jest.Mock).mockResolvedValueOnce({
+      data: {},
+      error: null,
+    });
+    const invalidateQueries = jest.spyOn(queryClient, "invalidateQueries");
+    renderComponent();
+
+    fireEvent.change(screen.getByRole("textbox", { name: /Display Name/ }), {
+      target: { value: "  Other Broker  " },
+    });
+    fireEvent.change(screen.getByLabelText("Flex Token"), { target: { value: "do-not-submit-token" } });
+    fireEvent.change(screen.getByLabelText("Flex Query ID"), { target: { value: "do-not-submit-query" } });
+    fireEvent.change(screen.getByLabelText("Sync Start Date"), { target: { value: "2026-03-01" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Broker Type" }), {
+      target: { value: "generic" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create Account" }));
+
+    await waitFor(() => {
+      expect(api.createAccountApiV1PortfoliosPortfolioIdAccountsPost).toHaveBeenCalledWith({
+        path: { portfolio_id: "port-1" },
+        body: {
+          name: "Other Broker",
+          account_number: undefined,
+          type: "generic",
+          properties: null,
+          portfolio_id: "port-1",
+          settings: undefined,
+        },
+      });
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+    expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: ["accounts", "port-1"] });
+    expect(toast.success).toHaveBeenCalledWith("Account created");
+    expect(clientGen.client.post).not.toHaveBeenCalled();
+  });
+
+  it("does not submit a generic account with a blank display name", () => {
+    renderComponent();
+    fireEvent.change(screen.getByRole("combobox", { name: "Broker Type" }), {
+      target: { value: "generic" },
+    });
+
+    expect(screen.getByRole("textbox", { name: /Display Name/ })).toBeInvalid();
+    fireEvent.change(screen.getByRole("textbox", { name: /Display Name/ }), {
+      target: { value: "   " },
+    });
+    expect(screen.getByRole("button", { name: "Create Account" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Create Account" }));
+    expect(api.createAccountApiV1PortfoliosPortfolioIdAccountsPost).not.toHaveBeenCalled();
+  });
+
+  it("disables generic account submission until creation completes", async () => {
+    let finishCreate!: (value: { data: object; error: null }) => void;
+    (api.createAccountApiV1PortfoliosPortfolioIdAccountsPost as jest.Mock).mockReturnValueOnce(
+      new Promise((resolve) => { finishCreate = resolve; }),
+    );
+    renderComponent();
+    fireEvent.change(screen.getByRole("combobox", { name: "Broker Type" }), {
+      target: { value: "generic" },
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: /Display Name/ }), {
+      target: { value: "Other Broker" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create Account" }));
+
+    expect(await screen.findByRole("button", { name: "Creating..." })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
+    expect(onClose).not.toHaveBeenCalled();
+
+    await act(async () => { finishCreate({ data: {}, error: null }); });
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    expect(api.createAccountApiV1PortfoliosPortfolioIdAccountsPost).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps generic account details available for retry when creation fails", async () => {
+    (api.createAccountApiV1PortfoliosPortfolioIdAccountsPost as jest.Mock)
+      .mockResolvedValueOnce({ data: null, error: { detail: "Account name already exists" } })
+      .mockResolvedValueOnce({ data: {}, error: null });
+    renderComponent();
+    fireEvent.change(screen.getByRole("combobox", { name: "Broker Type" }), {
+      target: { value: "generic" },
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: /Display Name/ }), {
+      target: { value: "Other Broker" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create Account" }));
+
+    expect(await screen.findByText("Account name already exists")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: /Display Name/ })).toHaveValue("Other Broker");
+    expect(screen.getByRole("combobox", { name: "Broker Type" })).toHaveValue("generic");
+    expect(screen.getByRole("button", { name: "Create Account" })).toBeEnabled();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(toast.success).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Create Account" }));
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText("Account name already exists")).not.toBeInTheDocument();
   });
 });

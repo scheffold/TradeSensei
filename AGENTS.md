@@ -120,6 +120,34 @@ Rules
 Reference implementation
 - `BrokerService._sync_schwab` (`backend/app/services/broker_service.py`) — fetches
   from the Schwab API, wraps the payload, delegates to `ImportService.import_trades()`.
+- Registered raw parsers: `IBKRXMLParser` (`ibkr`), `SchwabJSONParser` (`schwab`),
+  and `GenericParser` (`generic`, CSV/JSON). The generic parser validates one fill
+  per record and implements `parse_raw()` only; it never aggregates or persists.
+- Generic files belong only to `AccountType.GENERIC` accounts. These accounts
+  store no credentials and support no API sync. `ImportService` scopes their
+  raw IDs as `{user_id}:generic:{account_id}:{execution_id}`. Type changes to/from
+  generic require no raw/logical/trade history, including deleted/suppressed rows;
+  transitions through manual do not bypass the guard. Serialize checks/updates
+  with account-targeted ingestion; prefer a new account or explicitly clear all.
+- Generic v1 requires stable `instrument_id` values for FUTURE, plain-symbol
+  OPTION and every `order_id`-linked fill. Without order metadata, ordinary
+  EQUITY/FOREX/CRYPTO and valid OCC-symbol options may omit IDs. Keep symbol
+  spelling and ID presence/values consistent across exports; explicit option
+  fields must agree with OCC symbols. Distinct contracts need distinct IDs.
+- Every order-linked fill requires explicit OPEN/CLOSE; every order-linked CLOSE
+  requires reported `realized_pnl` (genuine zero is valid). OPEN with any non-null
+  P&L, including zero, is invalid. Keep an order ID stable across exports of that
+  order, use different IDs for opening/closing orders, and check marker consistency
+  within the file and against persisted target-account raw history under its lock.
+  Only ordinary CLOSE fills without order metadata retain the zero-marker fallback.
+- Preserve original generic records and unknown fields under inert
+  `raw_data.source_record`; only validated fields populate active order metadata
+  and derived cash. Do not synthesize IDs or change FIFO/combo algorithms.
+- Account-scoped raw IDs alone do not isolate projection matching. Protection
+  membership and existing-trade fallback use the full business identity
+  `(account_id, symbol, asset_class, broker_conid, opened_at)`; execution anchors
+  take precedence where available, including for different null-conid instruments.
+  See `docs/generic-import-format.md` for the v1 field and validation contract.
 
 Why this rule exists
 - A parallel ingestion implementation silently misses every protection, invariant,
@@ -195,6 +223,7 @@ Agent instructions
 | Topic | Location |
 |-------|---------|
 | API usage notes | `docs/api-usage.md` |
+| Generic CSV/JSON execution format | `docs/generic-import-format.md` |
 | Environment variables | `docs/dev-guide.md` |
 | CI/CD pipelines | `.github/workflows/` |
 | DB migration workflow | `.opencode/skills/db-migration/SKILL.md` |

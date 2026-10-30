@@ -26,6 +26,7 @@
 import { useState } from "react";
 import { Copy, CheckCircle2, ChevronDown, ChevronUp } from "lucide-react";
 import type { ImportResult } from "@/lib/types";
+import type { ImportRowError } from "@/lib/importErrors";
 import { ImportLogLine } from "@/components/imports/ImportLogLine";
 
 export type FileStatus = "pending" | "uploading" | "done" | "error";
@@ -35,6 +36,7 @@ export interface QueuedFile {
   status: FileStatus;
   result?: ImportResult;
   error?: string;
+  rowErrors?: ImportRowError[];
 }
 
 interface FileQueueProps {
@@ -233,7 +235,19 @@ function FileQueueItem({ qf }: { qf: QueuedFile }) {
 
           {/* Error message */}
           {qf.status === "error" && qf.error && (
-            <p className="mt-1 text-xs text-danger">{qf.error}</p>
+            <div role="alert" className={`mt-1 text-xs ${qf.rowErrors?.length ? "text-foreground" : "text-danger"} break-words`}>
+              <p>{qf.error}</p>
+              {qf.rowErrors && qf.rowErrors.length > 0 && (
+                <ul aria-label="Row validation errors" className="mt-2 list-disc pl-4 space-y-1">
+                  {qf.rowErrors.map((row, index) => (
+                    <li key={index}>
+                      <span className="font-mono">{typeof row.location === "number" ? `Line ${row.location}` : row.location}</span>
+                      {" — "}<span className="font-mono">{row.field}</span>: {row.message}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
           )}
         </div>
       </div>

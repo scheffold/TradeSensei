@@ -24,6 +24,7 @@ const CAPABILITY_MAP: Record<AccountType, BrokerImportCapability> = {
   ibkr: { maxWindowDays: 365, syncParam: { kind: "fromDate" } },
   schwab: { maxWindowDays: 365, syncParam: { kind: "days" } },
   manual: { maxWindowDays: 0, syncParam: { kind: "days" } },
+  generic: { maxWindowDays: 0, syncParam: { kind: "days" } },
 };
 
 export function capabilityFor(accountType: AccountType): BrokerImportCapability {

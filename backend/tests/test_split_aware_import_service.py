@@ -26,6 +26,8 @@ from app.core.exceptions import (
     ExecutionValidationError,
     TradeNotFoundError,
 )
+from app.models.trade import AssetClass
+from app.repositories.execution import ExecutionContractRef
 from app.services.import_service import ImportService
 from app.utils.parsers.aggregator import ExecutionAllocation, TradeCreateWithSources
 
@@ -518,17 +520,19 @@ async def test_resolve_protected_execution_snapshot_splits_open_and_closed() -> 
     )
     service._exec_repo.list_active_execution_contract_refs_by_trade_ids = AsyncMock(
         return_value=[
-            MagicMock(
+            ExecutionContractRef(
                 execution_id=open_exec_id,
                 symbol="OPENPROT",
                 conid="1001",
                 trade_id=open_trade_id,
+                asset_class=AssetClass.EQUITY,
             ),
-            MagicMock(
+            ExecutionContractRef(
                 execution_id=closed_exec_id,
                 symbol="CLOSEDPROT",
                 conid="1002",
                 trade_id=closed_trade_id,
+                asset_class=AssetClass.EQUITY,
             ),
         ]
     )
@@ -542,7 +546,7 @@ async def test_resolve_protected_execution_snapshot_splits_open_and_closed() -> 
     assert snapshot.closed_trade_ids == {closed_trade_id}
     assert snapshot.open_execution_ids == {open_exec_id}
     assert snapshot.closed_execution_ids == {closed_exec_id}
-    assert snapshot.closed_contracts == {("CLOSEDPROT", "1002")}
+    assert snapshot.closed_contracts == {("CLOSEDPROT", "1002", str(AssetClass.EQUITY))}
 
 
 @pytest.mark.unit

@@ -1,0 +1,33 @@
+{
+  "schema_version": "1",
+  "executions": [
+    {
+      "execution_id": "222001",
+      "executed_at": "2026-07-11T14:00:00Z",
+      "symbol": "TSHORT",
+      "asset_class": "EQUITY",
+      "side": "SELL",
+      "quantity": "10.0",
+      "price": "100.0",
+      "currency": "USD",
+      "commission": "0",
+      "open_close": "OPEN",
+      "multiplier": 1
+    },
+    {
+      "execution_id": "222002",
+      "executed_at": "2026-07-12T14:00:00Z",
+      "symbol": "TSHORT",
+      "asset_class": "EQUITY",
+      "side": "BUY",
+      "quantity": "10.0",
+      "price": "90.0",
+      "currency": "USD",
+      "commission": "0",
+      "open_close": "CLOSE",
+      "multiplier": 1,
+      "realized_pnl": "0"
+    }
+  ],
+  "corporate_actions": []
+}

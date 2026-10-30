@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from app.models.trade import AssetClass
 from app.repositories.execution import ExecutionRepository
 
 
@@ -159,9 +160,9 @@ async def test_list_manual_standin_contract_refs_by_user_account_filters_expecte
     trade_b = uuid.uuid4()
     session.execute.return_value = MagicMock(
         all=lambda: [
-            (trade_a, "AAPL", "1001"),
-            (trade_b, "MSFT", None),
-            (None, "IGNORED", "9999"),
+            (trade_a, "AAPL", "1001", AssetClass.EQUITY),
+            (trade_b, "MSFT", None, AssetClass.CRYPTO),
+            (None, "IGNORED", "9999", AssetClass.EQUITY),
         ]
     )
 
@@ -170,9 +171,9 @@ async def test_list_manual_standin_contract_refs_by_user_account_filters_expecte
         account_id=uuid.uuid4(),
     )
 
-    assert {(ref.trade_id, ref.symbol, ref.conid) for ref in refs} == {
-        (trade_a, "AAPL", "1001"),
-        (trade_b, "MSFT", None),
+    assert {(ref.trade_id, ref.symbol, ref.conid, ref.asset_class) for ref in refs} == {
+        (trade_a, "AAPL", "1001", AssetClass.EQUITY),
+        (trade_b, "MSFT", None, AssetClass.CRYPTO),
     }
 
 

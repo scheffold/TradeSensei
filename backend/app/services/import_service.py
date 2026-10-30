@@ -35,6 +35,8 @@ from sqlalchemy.exc import DBAPIError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import (
+    GENERIC_IMPORT_BROKER,
+    GENERIC_PIPELINE_ORDER_ID_KEY,
     IMPORT_EXECUTIONS_BATCH_SIZE,
     IMPORT_MEMORY_ALERT_THRESHOLD_BYTES,
     IMPORT_RETRY_BASE_DELAY_SECONDS,
@@ -45,9 +47,13 @@ from app.core.exceptions import (
     AccountNotFoundError,
     ExecutionNotFoundError,
     ExecutionValidationError,
+    GenericImportValidationError,
+    GenericRowError,
+    ImportNotAllowedError,
     ImportParseError,
     TradeNotFoundError,
 )
+from app.models.account import Account, AccountType
 from app.models.logical_execution import (
     EXECUTION_ORIGIN_IMPORTED,
     EXECUTION_ORIGIN_SPLIT,
@@ -62,7 +68,7 @@ from app.repositories.broker_raw_transaction_repository import (
 from app.repositories.corporate_action_repository import CorporateActionRepository
 from app.repositories.execution import ExecutionRepository, TradeContractRef
 from app.repositories.portfolio_repository import PortfolioRepository
-from app.repositories.trade_repository import TradeRepository
+from app.repositories.trade_repository import TradeProtectionKey, TradeRepository
 from app.schemas.broker_raw_transaction import BrokerRawTransactionCreate
 from app.schemas.corporate_action import CorporateActionCreateRequest
 from app.schemas.imports import FreshStartResult, ImportResult
@@ -81,10 +87,28 @@ from app.utils.parsers.aggregator import (
 )
 from app.utils.parsers.base import BrokerParser
 from app.utils.parsers.factory import BrokerType, get_parser
+from app.utils.parsers.generic import GenericParser
 from app.utils.parsers.schwab_json import decode_schwab_wrapped_payload
 from app.utils.schwab_account_resolution import resolve_schwab_account_entry
 
 logger = logging.getLogger(__name__)
+
+
+def _validate_generic_import_account(account: Account | None, broker: BrokerType) -> None:
+    """Keep generic raw-ID namespaces isolated from native broker accounts."""
+    if broker == BrokerType.GENERIC:
+        if account is None:
+            raise ImportNotAllowedError("Generic imports require an account_id.")
+        if account.type != AccountType.GENERIC:
+            raise ImportNotAllowedError("Generic files can only be imported into generic accounts.")
+    elif account is not None and account.type == AccountType.GENERIC:
+        raise ImportNotAllowedError("Generic accounts accept generic CSV/JSON file imports only.")
+
+
+def _trade_protection_key(account_id: uuid.UUID | None, trade: Trade | TradeCreate) -> TradeProtectionKey:
+    """Use the target account and complete instrument identity for matching."""
+    return account_id, trade.symbol, trade.asset_class, trade.broker_conid, trade.opened_at
+
 
 IMPORT_UPDATABLE_TRADE_FIELDS: frozenset[str] = frozenset(
     {
@@ -120,7 +144,7 @@ class ProtectedExecutionSnapshot:
         open_trade_ids: set[uuid.UUID],
         closed_trade_ids: set[uuid.UUID],
         closed_execution_ids: set[uuid.UUID],
-        closed_contracts: set[tuple[str, str | None]],
+        closed_contracts: set[tuple[str, str | None, str]],
         open_execution_ids: set[uuid.UUID],
         trade_by_execution_id: dict[uuid.UUID, uuid.UUID],
     ) -> None:
@@ -190,6 +214,40 @@ class ImportService:
         if timeout_seconds > 0:
             await self._session.execute(sa_text(f"SET LOCAL statement_timeout = '{timeout_seconds}s'"))
 
+    async def _validate_generic_order_markers(
+        self,
+        raw_records: Sequence[BrokerRawTransactionCreate],
+        parser: BrokerParser,
+        user_id: uuid.UUID,
+        account_id: uuid.UUID,
+    ) -> None:
+        """Reject cross-file order-marker conflicts before any persistence."""
+        incoming: list[tuple[int, BrokerRawTransactionCreate, str]] = []
+        for index, record in enumerate(raw_records):
+            order_id = record.raw_data.get(GENERIC_PIPELINE_ORDER_ID_KEY)
+            if isinstance(order_id, str) and order_id:
+                incoming.append((index, record, order_id))
+        if not incoming:
+            return
+        existing = await self._raw_repo.get_generic_order_markers(
+            user_id=user_id,
+            account_id=account_id,
+            order_ids=list(dict.fromkeys(order_id for _, _, order_id in incoming)),
+        )
+        locations = parser.execution_locations if isinstance(parser, GenericParser) else {}
+        errors: list[GenericRowError] = []
+        for index, record, order_id in incoming:
+            if any(marker != record.open_close for marker in existing.get(order_id, set())):
+                errors.append(
+                    GenericRowError(
+                        location=locations.get(record.id, f"executions[{index}]"),
+                        field="open_close",
+                        message="open_close must match the existing marker for this order in the target account.",
+                    )
+                )
+        if errors:
+            raise GenericImportValidationError(errors)
+
     async def import_trades(
         self,
         content: bytes,
@@ -214,7 +272,7 @@ class ImportService:
         → persist trades).
 
         Trades that have ``is_manually_edited = True`` are skipped during
-        re-import (matched by ``broker_conid`` + ``opened_at``) unless
+        re-import using their account/symbol/asset/contract/time identity unless
         ``overwrite_manually_edited`` is ``True``.
 
         All inserts/updates happen within the caller's transaction; the service
@@ -243,6 +301,8 @@ class ImportService:
         Raises:
             AccountNotFoundError: If ``account_id`` is provided but the
                 account does not exist or does not belong to ``user_id``.
+            ImportNotAllowedError: If a generic import lacks a generic account,
+                or a native broker payload targets a generic account.
         """
         # Verify the account belongs to the requesting user (only if provided).
         portfolio_base_currency: str | None = None
@@ -252,9 +312,11 @@ class ImportService:
                 account_id,
                 user_id,
                 portfolio_id,
+                for_update=True,
             )
             if account is None:
                 raise AccountNotFoundError(f"Account {account_id} not found for user {user_id}.")
+        _validate_generic_import_account(account, broker)
 
         portfolio = await self._portfolio_repo.get_by_id(portfolio_id, user_id)
         if portfolio is not None:
@@ -269,6 +331,7 @@ class ImportService:
         open_lots = await self._trade_repo.list_open_lots_by_user(
             user_id,
             portfolio_id,
+            account_id=account_id,
         )
         open_lot_ids = {lot.id for lot in open_lots}
         has_open_combo_seed_positions = False
@@ -278,14 +341,16 @@ class ImportService:
         orphaned_lots = await self._trade_repo.list_orphaned_lots_by_user(
             user_id,
             portfolio_id,
+            account_id=account_id,
         )
         orphaned_lot_ids = {lot.id for lot in orphaned_lots}
 
-        # Load the set of (broker_conid, opened_at) keys for manually-edited trades.
+        # Match protected trades by their complete account/instrument identity.
         manually_edited_keys = (
             await self._trade_repo.list_manually_edited_keys(
                 user_id,
                 portfolio_id,
+                account_id=account_id,
             )
             if not overwrite_manually_edited
             else set()
@@ -336,7 +401,7 @@ class ImportService:
         released_raw_ids: set[str] = set()
         pending_protected_close: bool = False
         trades_with_sources: list[TradeCreateWithSources] = []
-        existing_trades_by_key: dict[tuple[str | None, datetime], Trade] = {}
+        existing_trades_by_key: dict[TradeProtectionKey, Trade] = {}
         existing_trades_by_id: dict[uuid.UUID, Trade] = {}
         protected_ordered_legs: dict[uuid.UUID, list[uuid.UUID]] = {}
         manual_standin_trade_contract_refs: list[TradeContractRef] = []
@@ -371,6 +436,8 @@ class ImportService:
                 use_raw_pipeline = False
 
         if use_raw_pipeline:
+            if broker == BrokerType.GENERIC and account_id is not None:
+                await self._validate_generic_order_markers(raw_records, parser, user_id, account_id)
             if account_id is not None:
                 open_combo_positions = await self._trade_repo.list_open_combo_positions_by_user(
                     user_id=user_id,
@@ -400,9 +467,13 @@ class ImportService:
             # Stamp user_id / account_id onto each raw record.
             stamped_raw: list[BrokerRawTransactionCreate] = []
             for rec in raw_records:
+                raw_id = rec.id
+                if broker == BrokerType.GENERIC:
+                    execution_id = raw_id.removeprefix(f"{GENERIC_IMPORT_BROKER}:")
+                    raw_id = f"{GENERIC_IMPORT_BROKER}:{account_id}:{execution_id}"
                 # Prepend user_id to ensure the execution ID is globally unique
                 # across all users (idempotent per user).
-                new_id = rec.id if rec.id.startswith(f"{user_id}:") else f"{user_id}:{rec.id}"
+                new_id = raw_id if raw_id.startswith(f"{user_id}:") else f"{user_id}:{raw_id}"
                 stamped_raw.append(
                     rec.model_copy(
                         update={
@@ -537,7 +608,7 @@ class ImportService:
             if account_id is not None and should_rebuild_projection:
                 preserved_trade_ids = [trade.id for trade in open_combo_positions]
                 existing_trades = await self._trade_repo.list_by_user_account(user_id, account_id)
-                existing_trades_by_key = {(t.broker_conid, t.opened_at): t for t in existing_trades}
+                existing_trades_by_key = {_trade_protection_key(t.account_id, t): t for t in existing_trades}
                 existing_trades_by_id = {t.id: t for t in existing_trades}
                 protected_snapshot = await self._resolve_protected_execution_snapshot(
                     user_id=user_id,
@@ -585,7 +656,9 @@ class ImportService:
             fifo_trades_with_sources = aggregate_executions_fifo_with_sources(
                 [*seed_open_protected_trades, *combo_build_result.fifo_executions],
                 corporate_actions=ca_for_parser,
-                protected_contracts=(protected_snapshot.closed_contracts | {(ref.symbol, ref.conid) for ref in manual_standin_trade_contract_refs}),
+                protected_contracts=(
+                    protected_snapshot.closed_contracts | {(ref.symbol, ref.conid, str(ref.asset_class)) for ref in manual_standin_trade_contract_refs}
+                ),
             )
             trades_with_sources = sorted(
                 [*combo_build_result.combo_trades, *fifo_trades_with_sources],
@@ -636,7 +709,7 @@ class ImportService:
             anchor_trade_id_by_index = await self._resolve_anchor_trade_ids(trades_with_sources, user_id)
 
             for i, trade_data in enumerate(parsed_trades):
-                match_key = (trade_data.broker_conid, trade_data.opened_at)
+                match_key = _trade_protection_key(account_id, trade_data)
 
                 anchor_trade_id = anchor_trade_id_by_index.get(i)
                 existing_trade = existing_trades_by_id.get(anchor_trade_id) if anchor_trade_id is not None else None
@@ -698,6 +771,14 @@ class ImportService:
                     trades_created += 1
                     activity_log.append(f"created: trade {trade_data.symbol} opened {trade_data.opened_at}")
                 except Exception as exc:  # noqa: BLE001
+                    if broker == BrokerType.GENERIC:
+                        logger.error(
+                            "generic_import_persistence_failed user_id=%s account_id=%s error_type=%s",
+                            user_id,
+                            account_id,
+                            type(exc).__name__,
+                        )
+                        raise ImportParseError("Generic import could not be persisted.") from None
                     msg = f"Failed to persist trade {trade_data.symbol} opened at {trade_data.opened_at}: {exc}"
                     logger.warning(msg)
                     create_warnings.append(msg)
@@ -736,19 +817,23 @@ class ImportService:
                     trade.has_unlinked_executions = await self._exec_repo.has_unlinked_for_trade_contracts(trade.id)
 
                 changed_source_ids = list(inserted_raw_ids | released_raw_ids)
-                contract_to_trade_ids: dict[tuple[str, str | None], set[uuid.UUID]] = {}
+                contract_to_trade_ids: dict[tuple[str, str | None, str], set[uuid.UUID]] = {}
                 protected_refs = await self._exec_repo.list_active_execution_contract_refs_by_trade_ids(list(protected_snapshot.closed_trade_ids))
                 for ref in protected_refs:
-                    contract_to_trade_ids.setdefault((ref.symbol, ref.conid), set()).add(ref.trade_id)
+                    contract_to_trade_ids.setdefault((ref.symbol, ref.conid, str(ref.asset_class)), set()).add(ref.trade_id)
 
                 unlinked_due_to_protection = await self._exec_repo.list_unlinked_by_source_ids_for_contracts(
                     source_ids=changed_source_ids,
                     contracts=protected_snapshot.closed_contracts,
+                    user_id=user_id,
+                    account_id=account_id,
                 )
-                manual_standin_contracts = {(ref.symbol, ref.conid) for ref in manual_standin_trade_contract_refs}
+                manual_standin_contracts = {(ref.symbol, ref.conid, str(ref.asset_class)) for ref in manual_standin_trade_contract_refs}
                 unlinked_due_to_manual_standin = await self._exec_repo.list_unlinked_by_source_ids_for_contracts(
                     source_ids=changed_source_ids,
                     contracts=manual_standin_contracts,
+                    user_id=user_id,
+                    account_id=account_id,
                 )
                 unlinked_seen_ids = {execution.id for execution in unlinked_due_to_protection}
                 for execution in unlinked_due_to_manual_standin:
@@ -759,12 +844,14 @@ class ImportService:
                     warning_msg = f"protected_unlinked_execution: symbol={execution.symbol} executed_at={execution.executed_at.isoformat()}"
                     create_warnings.append(warning_msg)
                     logger.warning(warning_msg)
-                    for trade_id in contract_to_trade_ids.get((execution.symbol, execution.conid), set()):
+                    for trade_id in contract_to_trade_ids.get((execution.symbol, execution.conid, str(execution.asset_class)), set()):
                         flagged_trade_ids.add(trade_id)
 
-                standin_contract_to_trade_ids: dict[tuple[str, str | None], set[uuid.UUID]] = {}
+                standin_contract_to_trade_ids: dict[tuple[str, str | None, str], set[uuid.UUID]] = {}
                 for standin_ref in manual_standin_trade_contract_refs:
-                    standin_contract_to_trade_ids.setdefault((standin_ref.symbol, standin_ref.conid), set()).add(standin_ref.trade_id)
+                    standin_contract_to_trade_ids.setdefault((standin_ref.symbol, standin_ref.conid, str(standin_ref.asset_class)), set()).add(
+                        standin_ref.trade_id
+                    )
                 protected_unlinked_ids = {execution.id for execution in unlinked_due_to_protection}
                 for execution in unlinked_due_to_manual_standin:
                     if execution.id in protected_unlinked_ids:
@@ -772,7 +859,7 @@ class ImportService:
                     warning_msg = f"manual_standin_unlinked_execution: symbol={execution.symbol} executed_at={execution.executed_at.isoformat()}"
                     create_warnings.append(warning_msg)
                     logger.warning(warning_msg)
-                    for trade_id in standin_contract_to_trade_ids.get((execution.symbol, execution.conid), set()):
+                    for trade_id in standin_contract_to_trade_ids.get((execution.symbol, execution.conid, str(execution.asset_class)), set()):
                         flagged_trade_ids.add(trade_id)
 
                 for trade_id in flagged_trade_ids:
@@ -818,7 +905,7 @@ class ImportService:
                 # Already processed above in the source-tracking path
                 continue
             elif raw_projection_rebuild:
-                match_key = (trade_data.broker_conid, trade_data.opened_at)
+                match_key = _trade_protection_key(account_id, trade_data)
                 if match_key in manually_edited_keys:
                     trades_skipped_manually_edited += 1
                     continue
@@ -861,7 +948,7 @@ class ImportService:
                 # `execution-overwrite-protection` (task 5.2), not a
                 # regression. Both current parsers (IBKR, Schwab) implement
                 # `parse_raw`, so this path is a fallback only.
-                match_key = (trade_data.broker_conid, trade_data.opened_at)
+                match_key = _trade_protection_key(account_id, trade_data)
                 if match_key in manually_edited_keys:
                     logger.debug(
                         "Skipping close of manually-edited trade: symbol=%s opened_at=%s",
@@ -1017,7 +1104,7 @@ class ImportService:
 
             # --- Case 4: Entirely new trade (INSERT) ---
             # Skip trades that the user has manually corrected (task 5.2).
-            match_key = (trade_data.broker_conid, trade_data.opened_at)
+            match_key = _trade_protection_key(account_id, trade_data)
             if match_key in manually_edited_keys:
                 logger.debug(
                     "Skipping re-import of manually-edited trade: symbol=%s opened_at=%s",
@@ -1216,9 +1303,10 @@ class ImportService:
             AccountNotFoundError: If the account does not exist or does not
                 belong to ``user_id``.
         """
-        account = await self._account_repo.get_by_id(account_id, user_id, portfolio_id)
+        account = await self._account_repo.get_by_id(account_id, user_id, portfolio_id, for_update=True)
         if account is None:
             raise AccountNotFoundError(f"Account {account_id} not found for user {user_id}.")
+        _validate_generic_import_account(account, broker)
 
         # Step 1: Delete all logical executions for this account
         exec_deleted = await self._exec_repo.delete_all_for_account(
@@ -1435,11 +1523,9 @@ class ImportService:
                             existing = trade_allocation_map[trade_id]
                             if existing.quantity_used != alloc.quantity_used:
                                 logger.warning(
-                                    "Execution %s mismatched qty for trade %s: %s != %s",
+                                    "Execution %s has a quantity allocation mismatch for trade %s",
                                     execution_id,
                                     trade_id,
-                                    existing.quantity_used,
-                                    alloc.quantity_used,
                                 )
                             continue
 
@@ -1488,11 +1574,10 @@ class ImportService:
                 except (ExecutionNotFoundError, ExecutionValidationError) as exc:
                     split_errors += 1
                     logger.error(
-                        "split_backfill_failed execution_id=%s user_id=%s error=%s",
+                        "split_backfill_failed execution_id=%s user_id=%s error_type=%s",
                         execution_id,
                         user_id,
-                        str(exc),
-                        exc_info=True,
+                        type(exc).__name__,
                     )
 
             if split_inputs:
@@ -1820,7 +1905,7 @@ class ImportService:
         refs = await self._exec_repo.list_active_execution_contract_refs_by_trade_ids(list(open_trade_ids | closed_trade_ids))
         closed_execution_ids = {ref.execution_id for ref in refs if ref.trade_id in closed_trade_ids}
         open_execution_ids = {ref.execution_id for ref in refs if ref.trade_id in open_trade_ids}
-        closed_contracts = {(ref.symbol, ref.conid) for ref in refs if ref.trade_id in closed_trade_ids}
+        closed_contracts = {(ref.symbol, ref.conid, str(ref.asset_class)) for ref in refs if ref.trade_id in closed_trade_ids}
         trade_by_execution_id = {ref.execution_id: ref.trade_id for ref in refs}
         return ProtectedExecutionSnapshot(
             open_trade_ids=open_trade_ids,
@@ -2075,17 +2160,17 @@ class ImportService:
         while True:
             try:
                 return await operation()
-            except (OperationalError, DBAPIError):
+            except (OperationalError, DBAPIError) as exc:
                 if attempt >= IMPORT_RETRY_MAX_ATTEMPTS:
                     raise
                 delay = delays[attempt - 1]
                 logger.warning(
-                    "import_retry operation=%s attempt=%d/%d delay=%.3fs",
+                    "import_retry operation=%s attempt=%d/%d delay=%.3fs error_type=%s",
                     operation_name,
                     attempt,
                     IMPORT_RETRY_MAX_ATTEMPTS,
                     delay,
-                    exc_info=True,
+                    type(exc).__name__,
                 )
                 await asyncio.sleep(delay)
                 attempt += 1
@@ -2179,10 +2264,9 @@ class ImportService:
             created_children += 1
 
         logger.debug(
-            "split_execution_created execution_id=%s children=%d quantities=%s",
+            "split_execution_created execution_id=%s children=%d",
             execution_id,
             len(usage_list),
-            [allocation.quantity_used for _, allocation in usage_list],
         )
 
         return created_children
@@ -2306,11 +2390,9 @@ class ImportService:
             )
 
         logger.debug(
-            "Split execution %s: %s → trade %s, remainder: %s",
+            "Split execution %s assigned to trade %s with a remainder",
             execution_id,
-            quantity_for_trade,
             trade_id,
-            remainder_qty,
         )
 
         return child_for_trade

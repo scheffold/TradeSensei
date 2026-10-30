@@ -206,7 +206,7 @@ def test_build_combo_positions_unmatched_close_suppressed_for_protected_contract
 
     result = build_combo_positions(
         [close_leg_a, close_leg_b],
-        protected_contracts={("TEST", "A"), ("TEST", "B")},
+        protected_contracts={("TEST", "A", str(AssetClass.OPTION)), ("TEST", "B", str(AssetClass.OPTION))},
     )
 
     assert result.warnings == []
@@ -283,7 +283,7 @@ def test_build_combo_positions_unmatched_close_still_warns_when_not_fully_protec
 
     result = build_combo_positions(
         [open_leg_a, open_leg_b, close_leg_a, close_leg_c],
-        protected_contracts={("TEST", "A")},
+        protected_contracts={("TEST", "A", str(AssetClass.OPTION))},
     )
 
     assert len(result.warnings) == 1

@@ -19,6 +19,7 @@ import { BrokerAccountEditModal } from "@/components/settings/modals/BrokerAccou
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { toast } from "react-hot-toast";
 import * as api from "@/lib/api/index";
+import { client } from "@/lib/api/client.gen";
 import type { Account } from "@/lib/types";
 import "@testing-library/jest-dom";
 
@@ -236,5 +237,54 @@ describe("BrokerAccountEditModal", () => {
       const call = (api.updateAccountApiV1PortfoliosPortfolioIdAccountsAccountIdPatch as jest.Mock).mock.calls[0][0];
       expect(call.body).not.toHaveProperty("properties");
     });
+  });
+
+  it("never loads credentials or offers API sync controls for generic accounts", async () => {
+    await renderComponent({
+      ...mockAccount,
+      name: "Other Broker",
+      type: "generic",
+      has_api_keys: true,
+    });
+
+    expect(screen.getByText("Other broker (CSV/JSON)")).toBeInTheDocument();
+    expect(screen.getByText(/This account does not use credentials or API sync/)).toBeInTheDocument();
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+    expect(screen.queryByText("API Credentials")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Flex Token")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("App Key")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Test Connection|Connect.*Schwab|Sync/ })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/Sync Start Date|Default look-back|Flex date range/)).not.toBeInTheDocument();
+    expect(screen.getByText("Hides this account from imports, but retains all historical trades")).toBeInTheDocument();
+    expect(api.getAccountCredentialsApiV1PortfoliosPortfolioIdAccountsAccountIdCredentialsGet).not.toHaveBeenCalled();
+    expect(client.post).not.toHaveBeenCalled();
+  });
+
+  it("saves generic account edits without credentials, type changes, or sync settings", async () => {
+    (api.updateAccountApiV1PortfoliosPortfolioIdAccountsAccountIdPatch as jest.Mock)
+      .mockResolvedValueOnce({ data: {}, error: null });
+    await renderComponent({
+      ...mockAccount,
+      name: "Other Broker",
+      account_number: null,
+      type: "generic",
+      has_api_keys: false,
+    });
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Display Name" }), {
+      target: { value: "  Renamed Broker  " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save Changes" }));
+
+    await waitFor(() => {
+      expect(api.updateAccountApiV1PortfoliosPortfolioIdAccountsAccountIdPatch).toHaveBeenCalledWith({
+        path: { portfolio_id: "port-1", account_id: "acct-1" },
+        body: { name: "Renamed Broker", account_number: null },
+      });
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+    expect(toast.success).toHaveBeenCalledWith("Account updated");
+    expect(api.getAccountCredentialsApiV1PortfoliosPortfolioIdAccountsAccountIdCredentialsGet).not.toHaveBeenCalled();
+    expect(client.post).not.toHaveBeenCalled();
   });
 });

@@ -42,15 +42,22 @@ if TYPE_CHECKING:
 class AccountType(StrEnum):
     """Enumeration of supported account/broker types.
 
+    Type changes to/from GENERIC require no raw/logical/trade history,
+    including suppressed/deleted rows and transitions through MANUAL.
+    The history check and update are serialized with account-targeted ingestion.
+
     Attributes:
         MANUAL: A manually managed account with no live API connection.
         SCHWAB: A Charles Schwab brokerage account using the Schwab API.
         IBKR: An Interactive Brokers account using the IBKR Flex service.
+        GENERIC: A broker using generic CSV/JSON file imports only, without
+            stored credentials, API connections or API sync.
     """
 
     MANUAL = "manual"
     SCHWAB = "schwab"
     IBKR = "ibkr"
+    GENERIC = "generic"
 
 
 class Account(Base):
@@ -64,7 +71,7 @@ class Account(Base):
         user_id: Foreign key pointing to the owning :class:`~app.models.user.User`.
         name: Human-readable account name (e.g. "Interactive Brokers Main").
         account_number: Optional broker account number (e.g. "U1234567").
-        type: Account/broker type (MANUAL, SCHWAB, or IBKR).
+        type: Account/broker type (MANUAL, SCHWAB, IBKR, or GENERIC).
         currency: ISO-4217 currency code for the account (e.g. "USD").
         is_active: Soft-disable flag.
         settings: Optional JSONB blob storing per-account import/sync preferences

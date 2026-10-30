@@ -15,14 +15,15 @@
 
 import uuid
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.core.constants import (
     ACCOUNT_NAME_MAX_LENGTH,
     ACCOUNT_NAME_MIN_LENGTH,
     ACCOUNT_NUMBER_MAX_LENGTH,
+    GENERIC_ACCOUNT_CREDENTIALS_ERROR,
 )
 from app.models.account import AccountType
 
@@ -87,8 +88,11 @@ class AccountCreate(BaseModel):
         properties: Optional mapping of broker credential keys to plaintext
             values.  The service layer encrypts each value before storage.
             Pass ``null`` or omit to create an account without credentials.
+            Generic accounts reject non-empty maps and support file imports only.
         settings: Optional per-account import/sync settings. Defaults apply
             when omitted.
+        portfolio_id: Optional legacy body field; the API uses the owned path
+            portfolio_id and inherits the account currency from that portfolio.
     """
 
     name: str = Field(
@@ -106,15 +110,18 @@ class AccountCreate(BaseModel):
     )
     type: AccountType = Field(
         default=AccountType.MANUAL,
-        description=("Account/broker type. Use 'schwab' for Charles Schwab, 'ibkr' for Interactive Brokers, or 'manual' for a manual account."),
-        examples=["manual", "schwab", "ibkr"],
+        description=(
+            "Account/broker type: 'schwab' for Charles Schwab, 'ibkr' for Interactive Brokers, "
+            "'generic' for CSV/JSON-only imports from other brokers, or 'manual'. Generic accounts support no credentials or API sync."
+        ),
+        examples=["manual", "schwab", "ibkr", "generic"],
     )
     properties: dict[str, str] | None = Field(
         default=None,
         description=(
             "Optional map of broker credential keys to plaintext values "
             "(e.g. {'SCHWAB_APP_KEY': '...', 'SCHWAB_APP_SECRET': '...'}).  "
-            "Values are encrypted at rest. Pass null or omit to skip."
+            "Values are encrypted at rest. Pass null or omit to skip. For generic accounts, omit, pass null or use an empty map; non-empty maps are rejected."
         ),
         examples=[
             {"SCHWAB_APP_KEY": "abc123", "SCHWAB_APP_SECRET": "xyz789"},
@@ -123,12 +130,21 @@ class AccountCreate(BaseModel):
     )
     settings: AccountSettings | None = Field(
         default=None,
-        description="Optional per-account import/sync settings.",
+        description="Optional per-account import/sync settings. Generic accounts do not support API sync regardless of these settings.",
+        examples=[{"sync_days": 30, "flex_from_date_preset": "ytd"}, None],
     )
     portfolio_id: uuid.UUID | None = Field(
         default=None,
-        description="UUID of the portfolio this account belongs to.",
+        description="Optional legacy body field. The account creation API always uses the owned portfolio_id from the path instead.",
+        examples=["3fa85f64-5717-4562-b3fc-2c963f66afa6", None],
     )
+
+    @model_validator(mode="after")
+    def reject_generic_credentials(self) -> Self:
+        """Reject credential properties on file-only generic accounts."""
+        if self.type == AccountType.GENERIC and self.properties:
+            raise ValueError(GENERIC_ACCOUNT_CREDENTIALS_ERROR)
+        return self
 
 
 class AccountUpdate(BaseModel):
@@ -139,11 +155,16 @@ class AccountUpdate(BaseModel):
     Attributes:
         name: Updated account name.
         account_number: Updated broker account number. Pass ``null`` to clear.
-        type: Updated account/broker type.
+        type: Updated account/broker type. Changes to/from generic require no
+            raw, logical or trade history, including suppressed/deleted rows;
+            transitions through manual do not bypass this rule. The history
+            check and update are serialized with account-targeted ingestion.
         is_active: Updated active flag.
         properties: Optional map of broker credential keys to updated
             plaintext values.  Existing properties not included here are
-            left unchanged (merge semantics).
+            left unchanged (merge semantics). Generic accounts reject non-empty
+            maps, including when type is omitted. Accounts with stored
+            credentials cannot be switched to generic.
         settings: Optional updated import/sync settings. Merges with existing
             settings (partial update semantics).
     """
@@ -163,8 +184,14 @@ class AccountUpdate(BaseModel):
     )
     type: AccountType | None = Field(
         default=None,
-        description="Updated account/broker type. Omit to leave unchanged.",
-        examples=["schwab", None],
+        description=(
+            "Updated account/broker type. Omit to leave unchanged. 'generic' supports CSV/JSON file imports only, with no credentials or API sync. "
+            "Switching an account with stored credential properties to 'generic' is rejected. "
+            "Changes to/from 'generic' require no raw transactions, logical executions or trades, including suppressed/deleted history. "
+            "Transitions through 'manual' do not bypass the guard. The check/update is serialized with ingestion for the account. "
+            "Use a new account or explicitly clear all history first; credential restrictions still apply."
+        ),
+        examples=["schwab", "generic", None],
     )
     is_active: bool | None = Field(
         default=None,
@@ -174,7 +201,8 @@ class AccountUpdate(BaseModel):
     properties: dict[str, str] | None = Field(
         default=None,
         description=(
-            "Optional map of broker credential keys to updated plaintext values. Upserts each supplied key-value pair; keys not listed here are unchanged."
+            "Optional credential map. Upserts supplied keys; unlisted keys remain unchanged. "
+            "Non-empty maps are rejected if the effective type is generic (the existing type when omitted, otherwise the requested type)."
         ),
         examples=[
             {"SCHWAB_APP_KEY": "new-key-value"},
@@ -183,8 +211,16 @@ class AccountUpdate(BaseModel):
     )
     settings: AccountSettings | None = Field(
         default=None,
-        description="Optional updated import/sync settings. Omit to leave unchanged.",
+        description="Optional updated import/sync settings. Omit to leave unchanged. These settings do not enable API sync for generic accounts.",
+        examples=[{"sync_days": 90}, None],
     )
+
+    @model_validator(mode="after")
+    def reject_generic_credentials(self) -> Self:
+        """Reject explicit generic type/credential combinations at the boundary."""
+        if self.type == AccountType.GENERIC and self.properties:
+            raise ValueError(GENERIC_ACCOUNT_CREDENTIALS_ERROR)
+        return self
 
 
 class AccountRead(BaseModel):
@@ -221,6 +257,7 @@ class AccountRead(BaseModel):
     portfolio_id: uuid.UUID = Field(
         ...,
         description="UUID of the portfolio this account belongs to.",
+        examples=["3fa85f64-5717-4562-b3fc-2c963f66afa6"],
     )
     portfolio_name: str | None = Field(
         default=None,
@@ -239,12 +276,12 @@ class AccountRead(BaseModel):
     )
     type: AccountType = Field(
         ...,
-        description="Account/broker type.",
-        examples=["manual", "schwab", "ibkr"],
+        description="Account/broker type. 'generic' means generic v1 CSV/JSON file imports only, without broker credentials or API sync.",
+        examples=["manual", "schwab", "ibkr", "generic"],
     )
     currency: str = Field(
         ...,
-        description="ISO-4217 currency code for the account.",
+        description="ISO-4217 account currency inherited from the portfolio's base_currency at creation.",
         examples=["USD"],
     )
     is_active: bool = Field(
@@ -255,6 +292,7 @@ class AccountRead(BaseModel):
     settings: AccountSettings = Field(
         default_factory=AccountSettings,
         description=("Per-account import/sync settings. Returns defaults if not yet configured."),
+        examples=[{"sync_days": 30, "flex_from_date_preset": "ytd", "flex_custom_from_date": None}],
         validate_default=True,
     )
 
@@ -273,7 +311,7 @@ class AccountRead(BaseModel):
     )
     has_api_keys: bool = Field(
         default=False,
-        description=("True if the account has at least one stored broker credential. Computed by the service layer."),
+        description="True if the account has at least one stored broker credential. Computed by the service layer; false for generic accounts.",
         examples=[True, False],
     )
 
@@ -287,7 +325,10 @@ class AccountCredentialsRead(BaseModel):
 
     properties: dict[str, str] = Field(
         default_factory=dict,
-        description=("Plaintext account credential values keyed by property name. Returned only to the owning authenticated user."),
+        description=(
+            "Plaintext account credential values keyed by property name. Returned only to the owning authenticated user. "
+            "Generic accounts reject credential reads with HTTP 422 rather than returning this DTO."
+        ),
         examples=[
             {"ibkr_flex_token": "abc123", "ibkr_flex_query_id": "98765"},
             {"schwab_app_key": "key-123", "schwab_app_secret": "secret-456"},

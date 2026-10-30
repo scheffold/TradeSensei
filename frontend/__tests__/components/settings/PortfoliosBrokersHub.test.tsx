@@ -15,12 +15,14 @@
 
 import React from "react";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { PortfoliosBrokersHub } from "@/components/settings/PortfoliosBrokersHub";
 import { usePortfolios } from "@/hooks/usePortfolios";
 import { useSettings, useUpdateSettings } from "@/hooks/useSettings";
-import { useAccounts } from "@/hooks/useAccounts";
+import { useAccounts, useClearAccountTrades } from "@/hooks/useAccounts";
 import { THEME_COLORS } from "@/lib/constants/colors";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import type { Account } from "@/lib/types";
 import "@testing-library/jest-dom";
 
 jest.mock("@/hooks/usePortfolios");
@@ -103,6 +105,15 @@ const mockAccounts = [
     created_at: "2024-01-01T00:00:00Z",
   },
 ];
+
+const genericAccount: Account = {
+  ...mockAccounts[0],
+  id: "generic-account",
+  name: "Other Broker with a very long account name for archived CSV and JSON exports",
+  account_number: null,
+  type: "generic",
+  has_api_keys: false,
+};
 
 describe("PortfoliosBrokersHub", () => {
   let queryClient: QueryClient;
@@ -238,6 +249,39 @@ describe("PortfoliosBrokersHub", () => {
     expect(screen.getByText("Schwab IRA")).toBeInTheDocument();
     expect(screen.getByText("IBKR")).toBeInTheDocument();
     expect(screen.getByText("Schwab")).toBeInTheDocument();
+  });
+
+  it("gives each native and generic account an accessible, account-specific edit control", () => {
+    const accounts = [...mockAccounts, genericAccount];
+    mockUseAccounts.mockReturnValue({ data: accounts, isLoading: false, isError: false });
+    renderComponent();
+    fireEvent.click(screen.getByRole("button", { name: /Day Trading/ }));
+
+    for (const account of accounts) {
+      expect(screen.getByRole("button", { name: `Edit account ${account.name}` })).toBeEnabled();
+    }
+    expect(screen.getByText("Other broker (CSV/JSON)")).toBeInTheDocument();
+    expect(screen.getByText("File import")).toBeInTheDocument();
+  });
+
+  it("opens the selected generic account for editing with keyboard activation", async () => {
+    mockUseAccounts.mockReturnValue({
+      data: [mockAccounts[0], genericAccount],
+      isLoading: false,
+      isError: false,
+    });
+    (useClearAccountTrades as jest.Mock).mockReturnValue({ mutate: jest.fn(), isPending: false });
+    renderComponent();
+    fireEvent.click(screen.getByRole("button", { name: /Day Trading/ }));
+    const edit = screen.getByRole("button", { name: `Edit account ${genericAccount.name}` });
+    edit.focus();
+    expect(edit).toHaveFocus();
+
+    await userEvent.keyboard("{Enter}");
+
+    expect(await screen.findByRole("heading", { name: "Edit Account" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Display Name" })).toHaveValue(genericAccount.name);
+    expect(screen.queryByLabelText("Flex Token")).not.toBeInTheDocument();
   });
 
   it("shows Connected badge for active accounts with API keys", () => {

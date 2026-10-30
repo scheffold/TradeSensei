@@ -44,9 +44,10 @@ const ACCOUNT_TYPE_OPTIONS: { value: AccountType; label: string }[] = [
   { value: "manual", label: "Manual" },
   { value: "schwab", label: "Charles Schwab" },
   { value: "ibkr", label: "Interactive Brokers (IBKR)" },
+  { value: "generic", label: "Other broker (CSV/JSON)" },
 ];
 
-const CREDENTIAL_FIELDS: Record<Exclude<AccountType, "manual">, { key: string; label: string }[]> = {
+const CREDENTIAL_FIELDS: Record<Extract<AccountType, "ibkr" | "schwab">, { key: string; label: string }[]> = {
   schwab: [
     { key: "SCHWAB_APP_KEY", label: "App Key" },
     { key: "SCHWAB_APP_SECRET", label: "App Secret" },
@@ -68,7 +69,7 @@ export function AccountForm({ account, onSave, onCancel }: Props) {
   const [credentials, setCredentials] = useState<Record<string, string>>({});
 
   useEffect(() => {
-    if (!account || account.type === "manual") return;
+    if (!account || (account.type !== "ibkr" && account.type !== "schwab")) return;
     const portfolioId = account.portfolio_id;
     if (!portfolioId) return;
 
@@ -123,7 +124,9 @@ export function AccountForm({ account, onSave, onCancel }: Props) {
     const filledCredentials = Object.fromEntries(
       Object.entries(credentials).filter(([, v]) => v.trim() !== "")
     );
-    const properties = Object.keys(filledCredentials).length > 0 ? filledCredentials : null;
+    const properties = (type === "ibkr" || type === "schwab") && Object.keys(filledCredentials).length > 0
+      ? filledCredentials
+      : null;
 
     const payload = {
       name: name.trim(),
@@ -131,7 +134,7 @@ export function AccountForm({ account, onSave, onCancel }: Props) {
       type,
       properties,
       portfolio_id: portfolioId,
-      settings: {
+      settings: type === "generic" ? undefined : {
         sync_days: syncDays,
         flex_from_date_preset: flexPreset,
         flex_custom_from_date: null,
@@ -145,7 +148,7 @@ export function AccountForm({ account, onSave, onCancel }: Props) {
     }
   };
 
-  const credentialFields = type !== "manual" ? CREDENTIAL_FIELDS[type] : null;
+  const credentialFields = type === "ibkr" || type === "schwab" ? CREDENTIAL_FIELDS[type] : null;
 
   return (
     <form
@@ -198,7 +201,8 @@ export function AccountForm({ account, onSave, onCancel }: Props) {
             id="acct-type"
             value={type}
             onChange={(e) => {
-              setType(e.target.value as AccountType);
+              const selectedType = ACCOUNT_TYPE_OPTIONS.find((option) => option.value === e.target.value);
+              if (selectedType) setType(selectedType.value);
               setCredentials({});
             }}
             className={INPUT_CLASS}
@@ -212,7 +216,7 @@ export function AccountForm({ account, onSave, onCancel }: Props) {
         </div>
       </div>
 
-      {/* Broker Credentials — only for non-manual accounts */}
+      {/* Broker Credentials — only for API-connected account types */}
       {credentialFields && (
         <div className="border border-border rounded-lg p-4 space-y-3">
           <div>
@@ -246,8 +250,14 @@ export function AccountForm({ account, onSave, onCancel }: Props) {
         </div>
       )}
 
+      {type === "generic" && (
+        <p className="border border-border rounded-lg p-4 text-xs text-foreground">
+          Upload generic CSV or JSON files on the Import page. This account does not use credentials or API sync.
+        </p>
+      )}
+
       {/* Sync Settings — only for API-connected accounts */}
-      {type !== "manual" && (
+      {(type === "ibkr" || type === "schwab") && (
         <div className="border border-border rounded-lg p-4 space-y-3">
           <div>
             <p className="text-xs font-semibold text-muted-foreground">
@@ -327,4 +337,3 @@ export function AccountForm({ account, onSave, onCancel }: Props) {
     </form>
   );
 }
-

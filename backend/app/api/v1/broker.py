@@ -48,7 +48,7 @@ from app.services.broker_service import BrokerService
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/broker", tags=["broker"])
+router = APIRouter(prefix="/broker", tags=["accounts"])
 
 
 def _get_service(
@@ -76,19 +76,19 @@ def _get_service_public(
     "/sync/{account_id}",
     summary="Sync broker trades for an account",
     description=(
-        "Fetches recent orders from the broker API associated with the given "
-        "account, normalises them, deduplicates by broker order ID, and imports "
-        "new trades into the journal. "
+        "Fetch recent broker data and import it through the unified import pipeline, including its deduplication and trade protections. "
         "The account must have type ``schwab`` or ``ibkr`` and the corresponding "
-        "API credentials stored via the accounts API."
+        "API credentials stored via the accounts API. Manual and generic accounts return HTTP 400. "
+        "Generic accounts support generic v1 CSV/JSON file uploads only, without broker credentials or API sync."
     ),
     response_model=ResponseEnvelope[BrokerSyncResult],
     status_code=status.HTTP_200_OK,
     responses={
         200: {"description": "Sync completed; result contains import counts."},
-        400: {"description": "Account type is MANUAL — no API sync supported."},
+        400: {"description": "Manual/generic account has no API sync support, or required broker configuration/credentials are invalid."},
         401: {"description": "Missing or invalid Bearer token."},
         404: {"description": "Account not found (or owned by another user)."},
+        422: {"description": "Invalid account UUID or query parameters."},
         503: {"description": "Broker API temporarily unavailable; retry later."},
     },
 )
@@ -98,22 +98,23 @@ async def sync_account(
     service: Annotated[BrokerService, Depends(_get_service)],
     days: Annotated[
         int,
-        Query(description="Number of past days to include when from_date is omitted."),
+        Query(description="Number of past days to include when from_date is omitted.", examples=[30]),
     ] = 30,
     from_date: Annotated[
         str | None,
-        Query(description="Optional YYYYMMDD start date that overrides days."),
+        Query(description="Optional YYYYMMDD start date that overrides days for IBKR Flex sync.", examples=["20260301"]),
     ] = None,
     overwrite_manually_edited: Annotated[
         bool,
-        Query(description="When true, overwrite trades marked as manually edited."),
+        Query(description="When true, overwrite trades marked as manually edited.", examples=[False, True]),
     ] = False,
 ) -> ResponseEnvelope[BrokerSyncResult]:
     """Trigger an incremental broker trade sync for the given account.
 
     Dispatches synchronisation based on the account's broker type.  The
     account must belong to the authenticated user; a different user's account
-    UUID returns HTTP 404 to prevent account-ID enumeration.
+    UUID returns HTTP 404 to prevent account-ID enumeration. Manual and
+    generic accounts return HTTP 400; generic imports use file uploads only.
 
     Args:
         account_id: UUID path parameter identifying the account to sync.
@@ -133,8 +134,12 @@ async def sync_account(
         :class:`~app.schemas.broker.BrokerSyncResult`.
 
     Raises:
+        HTTPException: 400 if the account type is manual/generic or required
+            broker configuration/credentials are invalid.
+        HTTPException: 401 if authentication fails.
         HTTPException: 404 if the account is not found for this user.
-        HTTPException: 400 if the account type is MANUAL.
+        HTTPException: 422 if the account UUID or query parameters are invalid.
+        HTTPException: 503 if the upstream broker service is unavailable.
     """
     try:
         result = await service.sync_account(
@@ -166,15 +171,17 @@ async def sync_account(
     "/schwab/authorize/{account_id}",
     summary="Start Schwab OAuth authorization",
     description=(
-        "Generates PKCE/state correlation records for a Schwab account and returns the Schwab authorization URL. Requires Bearer auth and account ownership."
+        "Generate PKCE/state correlation records for a Schwab account and return the Schwab authorization URL. "
+        "Requires Bearer auth and account ownership. Generic accounts are file-only and return HTTP 400 without starting an API connection."
     ),
     response_model=ResponseEnvelope[SchwabAuthorizeResponse],
     status_code=status.HTTP_200_OK,
     responses={
         200: {"description": "Authorization URL generated."},
-        400: {"description": "Invalid Schwab OAuth configuration or missing account app credentials."},
+        400: {"description": "Generic account has no API support, invalid Schwab OAuth configuration, or missing account app credentials."},
         401: {"description": "Missing or invalid Bearer token."},
         404: {"description": "Account not found (or owned by another user)."},
+        422: {"description": "Invalid account UUID."},
     },
 )
 async def start_schwab_authorization(
@@ -182,6 +189,23 @@ async def start_schwab_authorization(
     current_user: Annotated[User, Depends(get_current_user)],
     service: Annotated[BrokerService, Depends(_get_service)],
 ) -> ResponseEnvelope[SchwabAuthorizeResponse]:
+    """Start account-owned Schwab authorization without connecting generic accounts.
+
+    Args:
+        account_id: UUID of the account to authorize.
+        current_user: The authenticated account owner.
+        service: Injected broker service.
+
+    Returns:
+        A response envelope containing the Schwab authorization URL.
+
+    Raises:
+        HTTPException: 400 if the account is generic or OAuth configuration
+            or account credentials are invalid.
+        HTTPException: 401 if authentication fails.
+        HTTPException: 404 if the account is not found for this user.
+        HTTPException: 422 if the account UUID is invalid.
+    """
     try:
         authorization_url = await service.start_schwab_authorization(account_id=account_id, user_id=current_user.id)
     except AccountNotFoundError as exc:
@@ -194,14 +218,18 @@ async def start_schwab_authorization(
 @router.post(
     "/schwab/complete/{account_id}",
     summary="Complete Schwab OAuth with pasted redirect URL",
-    description=("Completes Schwab OAuth for paste mode by parsing code/state from a pasted redirect URL, exchanging the code, and storing encrypted tokens."),
+    description=(
+        "Complete Schwab OAuth for paste mode by parsing code/state from a pasted redirect URL, exchanging the code and storing encrypted tokens. "
+        "Requires Bearer auth and account ownership. Generic accounts return HTTP 400 because they cannot store credentials or use API connections."
+    ),
     response_model=ResponseEnvelope[BrokerStatusResponse],
     status_code=status.HTTP_200_OK,
     responses={
         200: {"description": "Schwab account connected."},
-        400: {"description": "Invalid redirect URL, state mismatch, or exchange failure."},
+        400: {"description": "Generic account has no API support, invalid OAuth mode/redirect URL, state mismatch, or exchange failure."},
         401: {"description": "Missing or invalid Bearer token."},
         404: {"description": "Account not found (or owned by another user)."},
+        422: {"description": "Invalid account UUID or request payload."},
     },
 )
 async def complete_schwab_connection(
@@ -210,6 +238,24 @@ async def complete_schwab_connection(
     current_user: Annotated[User, Depends(get_current_user)],
     service: Annotated[BrokerService, Depends(_get_service)],
 ) -> ResponseEnvelope[BrokerStatusResponse]:
+    """Complete the pasted-URL OAuth flow for an owned, non-generic account.
+
+    Args:
+        account_id: UUID of the account whose OAuth flow is being completed.
+        payload: Pasted redirect URL containing the authorization code and state.
+        current_user: The authenticated account owner.
+        service: Injected broker service.
+
+    Returns:
+        A response envelope containing the resulting connection status.
+
+    Raises:
+        HTTPException: 400 if the account is generic or the OAuth mode,
+            redirect URL, state or token exchange is invalid.
+        HTTPException: 401 if authentication fails.
+        HTTPException: 404 if the account is not found for this user.
+        HTTPException: 422 if the account UUID or payload is invalid.
+    """
     try:
         await service.complete_schwab_connection(
             account_id=account_id,
@@ -266,13 +312,18 @@ async def schwab_callback(
 @router.get(
     "/schwab/status/{account_id}",
     summary="Get Schwab OAuth connection status",
-    description="Returns whether the Schwab account currently has stored OAuth access/refresh tokens.",
+    description=(
+        "Return whether the owned Schwab account currently has stored OAuth access/refresh tokens. "
+        "Generic accounts return HTTP 400 rather than a disconnected status because they support file imports only."
+    ),
     response_model=ResponseEnvelope[BrokerStatusResponse],
     status_code=status.HTTP_200_OK,
     responses={
         200: {"description": "Current Schwab connection status."},
+        400: {"description": "Generic accounts do not support API connections, or broker credential configuration is invalid."},
         401: {"description": "Missing or invalid Bearer token."},
         404: {"description": "Account not found (or owned by another user)."},
+        422: {"description": "Invalid account UUID."},
     },
 )
 async def get_schwab_status(
@@ -280,23 +331,47 @@ async def get_schwab_status(
     current_user: Annotated[User, Depends(get_current_user)],
     service: Annotated[BrokerService, Depends(_get_service)],
 ) -> ResponseEnvelope[BrokerStatusResponse]:
+    """Read the OAuth connection status for an owned, non-generic account.
+
+    Args:
+        account_id: UUID of the account whose status is requested.
+        current_user: The authenticated account owner.
+        service: Injected broker service.
+
+    Returns:
+        A response envelope containing the current Schwab connection status.
+
+    Raises:
+        HTTPException: 400 if the account is generic or credential configuration
+            is invalid; generic accounts have no API connection status.
+        HTTPException: 401 if authentication fails.
+        HTTPException: 404 if the account is not found for this user.
+        HTTPException: 422 if the account UUID is invalid.
+    """
     try:
         status_payload = await service.get_schwab_status(account_id=account_id, user_id=current_user.id)
     except AccountNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ConfigurationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     return ResponseEnvelope(data=status_payload)
 
 
 @router.delete(
     "/schwab/connect/{account_id}",
     summary="Disconnect Schwab OAuth connection",
-    description=("Deletes stored Schwab OAuth token properties for the account and emits a broker.schwab_disconnected audit event."),
+    description=(
+        "Delete stored Schwab OAuth token properties for the owned account and emit a broker.schwab_disconnected audit event. "
+        "Generic accounts return HTTP 400 because file-only accounts have no API connection to disconnect."
+    ),
     response_model=ResponseEnvelope[BrokerStatusResponse],
     status_code=status.HTTP_200_OK,
     responses={
         200: {"description": "Schwab disconnected."},
+        400: {"description": "Generic accounts do not support API connections, or broker credential configuration is invalid."},
         401: {"description": "Missing or invalid Bearer token."},
         404: {"description": "Account not found (or owned by another user)."},
+        422: {"description": "Invalid account UUID."},
     },
 )
 async def disconnect_schwab(
@@ -304,9 +379,28 @@ async def disconnect_schwab(
     current_user: Annotated[User, Depends(get_current_user)],
     service: Annotated[BrokerService, Depends(_get_service)],
 ) -> ResponseEnvelope[BrokerStatusResponse]:
+    """Disconnect Schwab OAuth for an owned, non-generic account.
+
+    Args:
+        account_id: UUID of the account to disconnect.
+        current_user: The authenticated account owner.
+        service: Injected broker service.
+
+    Returns:
+        A response envelope containing the disconnected status.
+
+    Raises:
+        HTTPException: 400 if the account is generic or credential configuration
+            is invalid; generic accounts have no API connection to disconnect.
+        HTTPException: 401 if authentication fails.
+        HTTPException: 404 if the account is not found for this user.
+        HTTPException: 422 if the account UUID is invalid.
+    """
     try:
         await service.disconnect_schwab(account_id=account_id, user_id=current_user.id)
         status_payload = await service.get_schwab_status(account_id=account_id, user_id=current_user.id)
     except AccountNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ConfigurationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     return ResponseEnvelope(data=status_payload)

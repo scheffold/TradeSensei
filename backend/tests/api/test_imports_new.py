@@ -249,9 +249,7 @@ async def test_fresh_start_account_not_found(client: AsyncClient, primary_user: 
         
     assert response.status_code == 404
 
-async def test_validate_account_import_success(mock_session):
-    from unittest.mock import MagicMock
-
+async def test_validate_account_import_success(mock_service):
     from app.api.v1.imports import _validate_account_import
     from app.core.exceptions import AccountNotFoundError, ImportNotAllowedError
     from app.models.account import Account, AccountType
@@ -261,34 +259,30 @@ async def test_validate_account_import_success(mock_session):
     user_id = uuid.uuid4()
     
     mock_account = Account(id=account_id, type=AccountType.IBKR)
-    mock_result = MagicMock()
-    mock_result.scalar_one_or_none.return_value = mock_account
-    mock_session.execute.return_value = mock_result
+    mock_service.get_account.return_value = mock_account
     
-    broker = await _validate_account_import(account_id, portfolio_id, user_id, "xml", mock_session)
+    broker = await _validate_account_import(account_id, portfolio_id, user_id, "xml", mock_service)
     assert broker == BrokerType.IBKR
+    mock_service.get_account.assert_awaited_once_with(account_id, user_id, portfolio_id)
     
     # Test not found
-    mock_result.scalar_one_or_none.return_value = None
+    mock_service.get_account.side_effect = AccountNotFoundError("Not found")
     with pytest.raises(AccountNotFoundError):
-        await _validate_account_import(account_id, portfolio_id, user_id, "xml", mock_session)
+        await _validate_account_import(account_id, portfolio_id, user_id, "xml", mock_service)
+    mock_service.get_account.side_effect = None
 
     # Test manual
     mock_account.type = AccountType.MANUAL
-    mock_result.scalar_one_or_none.return_value = mock_account
     with pytest.raises(ImportNotAllowedError):
-        await _validate_account_import(account_id, portfolio_id, user_id, "xml", mock_session)
+        await _validate_account_import(account_id, portfolio_id, user_id, "xml", mock_service)
 
     # Test bad extension
     mock_account.type = AccountType.IBKR
-    mock_session.scalar.return_value = mock_account
     with pytest.raises(ImportNotAllowedError):
-        await _validate_account_import(account_id, portfolio_id, user_id, "csv", mock_session)
+        await _validate_account_import(account_id, portfolio_id, user_id, "csv", mock_service)
 
     # Test schwab csv exception message specifically handled in code
     mock_account.type = AccountType.SCHWAB
-    mock_session.scalar.return_value = mock_account
     with pytest.raises(ImportNotAllowedError) as exc_info:
-        await _validate_account_import(account_id, portfolio_id, user_id, "csv", mock_session)
+        await _validate_account_import(account_id, portfolio_id, user_id, "csv", mock_service)
     assert "Schwab accounts require JSON format" in str(exc_info.value)
-

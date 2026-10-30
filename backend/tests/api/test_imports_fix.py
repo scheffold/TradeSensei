@@ -12,7 +12,7 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import uuid
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -23,40 +23,36 @@ from app.utils.parsers.factory import BrokerType
 
 
 @pytest.mark.asyncio
-async def test_validate_account_import_success(mock_session):
+async def test_validate_account_import_success():
     account_id = uuid.uuid4()
     portfolio_id = uuid.uuid4()
     user_id = uuid.uuid4()
     
     mock_account = Account(id=account_id, type=AccountType.IBKR)
-    
-    with patch("app.api.v1.imports.AccountRepository") as MockRepo:
-        mock_repo_instance = MockRepo.return_value
-        mock_repo_instance.get_by_id = AsyncMock(return_value=mock_account)
-        
-        broker = await _validate_account_import(account_id, portfolio_id, user_id, "xml", mock_session)
-        assert broker == BrokerType.IBKR
-        
-        # Test not found
-        mock_repo_instance.get_by_id.return_value = None
-        with pytest.raises(AccountNotFoundError):
-            await _validate_account_import(account_id, portfolio_id, user_id, "xml", mock_session)
+    mock_service = AsyncMock()
+    mock_service.get_account.return_value = mock_account
+    broker = await _validate_account_import(account_id, portfolio_id, user_id, "xml", mock_service)
+    assert broker == BrokerType.IBKR
+    mock_service.get_account.assert_awaited_once_with(account_id, user_id, portfolio_id)
 
-        # Test manual
-        mock_account.type = AccountType.MANUAL
-        mock_repo_instance.get_by_id.return_value = mock_account
-        with pytest.raises(ImportNotAllowedError):
-            await _validate_account_import(account_id, portfolio_id, user_id, "xml", mock_session)
+    # Test not found
+    mock_service.get_account.side_effect = AccountNotFoundError("Not found")
+    with pytest.raises(AccountNotFoundError):
+        await _validate_account_import(account_id, portfolio_id, user_id, "xml", mock_service)
+    mock_service.get_account.side_effect = None
 
-        # Test bad extension
-        mock_account.type = AccountType.IBKR
-        mock_repo_instance.get_by_id.return_value = mock_account
-        with pytest.raises(ImportNotAllowedError):
-            await _validate_account_import(account_id, portfolio_id, user_id, "csv", mock_session)
+    # Test manual
+    mock_account.type = AccountType.MANUAL
+    with pytest.raises(ImportNotAllowedError):
+        await _validate_account_import(account_id, portfolio_id, user_id, "xml", mock_service)
 
-        # Test schwab csv exception
-        mock_account.type = AccountType.SCHWAB
-        mock_repo_instance.get_by_id.return_value = mock_account
-        with pytest.raises(ImportNotAllowedError) as exc_info:
-            await _validate_account_import(account_id, portfolio_id, user_id, "csv", mock_session)
-        assert "Schwab accounts require JSON format" in str(exc_info.value)
+    # Test bad extension
+    mock_account.type = AccountType.IBKR
+    with pytest.raises(ImportNotAllowedError):
+        await _validate_account_import(account_id, portfolio_id, user_id, "csv", mock_service)
+
+    # Test schwab csv exception
+    mock_account.type = AccountType.SCHWAB
+    with pytest.raises(ImportNotAllowedError) as exc_info:
+        await _validate_account_import(account_id, portfolio_id, user_id, "csv", mock_service)
+    assert "Schwab accounts require JSON format" in str(exc_info.value)

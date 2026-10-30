@@ -17,7 +17,8 @@ Trade Sensei lets you record every trade, import activity from your broker, and 
 - **Trade journaling** — add trades manually, sync directly via broker APIs, or import from broker files
 - **Broker integration (API Sync & File Import)** —
   - **Interactive Brokers (IBKR):** Direct Flex Web Service API sync and Flex Query XML file import (supports both Activity and Trade Confirmation Flex Queries)
-  - **Charles Schwab:** Direct OAuth 2.0 Trader API sync and wrapped Transactions JSON file import (e.g. via `tools/schwab_cli.py`)
+   - **Charles Schwab:** Direct OAuth 2.0 Trader API sync and wrapped Transactions JSON file import (e.g. via `tools/schwab_cli.py`)
+   - **Other brokers:** Generic execution-level CSV/JSON file import; see the [v1 format reference](docs/generic-import-format.md)
 - **Unified raw-to-FIFO pipeline** — stores immutable raw broker transactions and logical executions, automatically handling FIFO matching, option combos, corporate actions (stock splits), duplicate detection, and overwrite protection for manually edited trades
 - **Trade image attachments** — attach chart screenshots or setup images directly to trades via drag-and-drop; requires an S3-compatible storage backend (bundled with SeaweedFS by default)
 - **Execution leg editor** — record, split, merge, or restore individual fills with split-aware logic; timestamps auto-sync to the trade open/close times
@@ -124,8 +125,8 @@ docker compose up -d
 
 1. Open the frontend at `http://localhost:3000`
 2. Register a new account
-3. Go to **Settings → Accounts & Integrations** and create a broker account (`IBKR`, `Schwab`, or `Manual`)
-4. Sync trades directly via the broker API, upload a broker export file (`.xml` for IBKR, `.json` for Schwab), or add your first trade manually from the dashboard
+3. Go to **Settings → Accounts & Integrations** and create a broker account (`IBKR`, `Schwab`, **Other broker (CSV/JSON)**, or `Manual`)
+4. Sync trades directly via a supported broker API, upload a broker export file (`.xml` for IBKR, `.json` for Schwab, [generic `.csv`/`.json`](docs/generic-import-format.md) for Other broker), or add your first trade manually from the dashboard
 
 For trade review, keyboard navigation, and mobile controls, see the [user guide](docs/user-guide.md).
 
@@ -188,6 +189,7 @@ Trade Sensei uses a unified import pipeline that processes raw executions, links
 Supported account types:
 - **Interactive Brokers (`ibkr`)** — API sync via IBKR Flex Web Service + file upload via **Flex Query XML (`.xml`)**
 - **Charles Schwab (`schwab`)** — API sync via Schwab Trader API (OAuth 2.0 + PKCE) + file upload via **wrapped Transactions JSON (`.json`)**
+- **Other broker (`generic`)** — [generic execution CSV/JSON](docs/generic-import-format.md) file uploads only; no credentials or API sync
 - **Manual (`manual`)** — manual trade entry and execution tracking
 
 ### 1. Interactive Brokers (IBKR)
@@ -205,6 +207,18 @@ Supported account types:
 - **Direct API Sync:** Configure your Schwab account with your Schwab Developer App Key & Secret, then connect via OAuth 2.0 (supports both local redirect callback and paste-URL modes). Once connected, sync transactions directly for any lookback window (up to 365 days).
 - **File Upload / CLI:** Use the bundled CLI tool (`python tools/schwab_cli.py transactions`) to fetch transactions into the wrapped JSON format and upload the `.json` file in the UI or via `/api/v1/portfolios/{portfolio_id}/imports/upload`.
 - See [`docs/schwab-positions-tool.md`](docs/schwab-positions-tool.md) for full CLI usage.
+
+### 3. Other brokers (CSV/JSON)
+
+Create an **Other broker (CSV/JSON)** account, convert each fill to the
+[generic v1 format](docs/generic-import-format.md), and upload it on the Import
+page. The Import and Help pages provide authenticated JSON Schema and CSV
+template downloads; in-app help starts at `/help#generic-import-format`.
+
+Use stable execution and contract IDs, explicit order markers and reported P&L
+for order-linked closes as described in the reference. Keep native imports in
+their own account types; use a new account when changing import formats, or
+deliberately clear all raw/execution/trade history before changing to/from generic.
 
 ---
 

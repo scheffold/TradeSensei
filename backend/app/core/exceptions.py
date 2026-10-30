@@ -13,6 +13,8 @@
 
 """Domain-level exceptions for the Trade Sensei application."""
 
+from dataclasses import dataclass
+
 
 class TradeNotFoundError(Exception):
     """Raised when a trade cannot be found by its identifier."""
@@ -74,6 +76,10 @@ class AccountNotFoundError(Exception):
     """Raised when an account cannot be found for the requesting user."""
 
 
+class AccountValidationError(ValueError):
+    """Raised when an account update violates an account-type restriction."""
+
+
 class InvalidTokenError(Exception):
     """Raised when a JWT cannot be decoded or has an invalid sub claim."""
 
@@ -84,6 +90,34 @@ class UserNotFoundError(Exception):
 
 class ImportParseError(ValueError):
     """Raised when a broker import file cannot be parsed."""
+
+
+@dataclass(frozen=True, slots=True)
+class GenericRowError:
+    """Describe a generic record error without including any supplied values.
+
+    Attributes:
+        location: Physical CSV line number or JSON array-index location.
+        field: Format field name associated with the error.
+        message: Safe description derived from validation rules only.
+    """
+
+    location: int | str
+    field: str
+    message: str
+
+
+class GenericImportValidationError(ImportParseError):
+    """Reject an entire generic file while preserving every safe row error."""
+
+    def __init__(self, errors: list[GenericRowError]) -> None:
+        """Initialise a validation failure with its collected field errors.
+
+        Args:
+            errors: All invalid field locations, without raw record values.
+        """
+        super().__init__("Generic import validation failed.")
+        self.errors = errors
 
 
 class UnsupportedBrokerError(ValueError):

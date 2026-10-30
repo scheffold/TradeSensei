@@ -45,7 +45,9 @@ def override_dependency(mock_service):
     from app.api.v1.imports import _get_flex_service
     app.dependency_overrides[_get_flex_service] = lambda: mock_service
     app.dependency_overrides[get_session_with_rls] = lambda: AsyncMock()
-    yield mock_service
+    with patch("app.api.v1.imports.AccountService.get_account", new_callable=AsyncMock) as mock_get_account:
+        mock_get_account.return_value = Account(id=uuid.uuid4(), name="IBKR", type=AccountType.IBKR)
+        yield mock_service
     app.dependency_overrides.clear()
 
 
@@ -268,8 +270,8 @@ async def test_fresh_start_account_not_found_legacy(client: AsyncClient, primary
     portfolio_id = uuid.uuid4()
     account_id = uuid.uuid4()
     from unittest.mock import AsyncMock, patch
-    with patch("app.api.v1.imports.AccountRepository.get_by_id", new_callable=AsyncMock) as mock_get:
-        mock_get.return_value = None
+    with patch("app.api.v1.imports.AccountService.get_account", new_callable=AsyncMock) as mock_get:
+        mock_get.side_effect = AccountNotFoundError("Not found")
         response = await client.post(
             f"/api/v1/portfolios/{portfolio_id}/imports/{account_id}/fresh-start",
             data={"broker": "ibkr", "acknowledged": "true"}, files={"file": ("test.xml", b"x")}, headers=primary_user["headers"]
@@ -278,7 +280,7 @@ async def test_fresh_start_account_not_found_legacy(client: AsyncClient, primary
 
 
 @pytest.mark.asyncio
-async def test_validate_account_import_success(mock_session):
+async def test_validate_account_import_success(mock_service):
     portfolio_id = uuid.uuid4()
     account_id = uuid.uuid4()
     portfolio_id = uuid.uuid4()
@@ -286,36 +288,32 @@ async def test_validate_account_import_success(mock_session):
 
     mock_account = Account(id=account_id, type=AccountType.IBKR)
 
-    with patch("app.api.v1.imports.AccountRepository") as MockRepo:
-        mock_repo_instance = MockRepo.return_value
-        mock_repo_instance.get_by_id = AsyncMock(return_value=mock_account)
+    mock_service.get_account.return_value = mock_account
+    broker = await _validate_account_import(account_id, portfolio_id, user_id, "xml", mock_service)
+    assert broker == BrokerType.IBKR
+    mock_service.get_account.assert_awaited_once_with(account_id, user_id, portfolio_id)
 
-        broker = await _validate_account_import(account_id, portfolio_id, user_id, "xml", mock_session)
-        assert broker == BrokerType.IBKR
+    # Test not found
+    mock_service.get_account.side_effect = AccountNotFoundError("Not found")
+    with pytest.raises(AccountNotFoundError):
+        await _validate_account_import(account_id, portfolio_id, user_id, "xml", mock_service)
+    mock_service.get_account.side_effect = None
 
-        # Test not found
-        mock_repo_instance.get_by_id.return_value = None
-        with pytest.raises(AccountNotFoundError):
-            await _validate_account_import(account_id, portfolio_id, user_id, "xml", mock_session)
+    # Test manual
+    mock_account.type = AccountType.MANUAL
+    with pytest.raises(ImportNotAllowedError):
+        await _validate_account_import(account_id, portfolio_id, user_id, "xml", mock_service)
 
-        # Test manual
-        mock_account.type = AccountType.MANUAL
-        mock_repo_instance.get_by_id.return_value = mock_account
-        with pytest.raises(ImportNotAllowedError):
-            await _validate_account_import(account_id, portfolio_id, user_id, "xml", mock_session)
+    # Test bad extension
+    mock_account.type = AccountType.IBKR
+    with pytest.raises(ImportNotAllowedError):
+        await _validate_account_import(account_id, portfolio_id, user_id, "csv", mock_service)
 
-        # Test bad extension
-        mock_account.type = AccountType.IBKR
-        mock_repo_instance.get_by_id.return_value = mock_account
-        with pytest.raises(ImportNotAllowedError):
-            await _validate_account_import(account_id, portfolio_id, user_id, "csv", mock_session)
-
-        # Test schwab csv exception
-        mock_account.type = AccountType.SCHWAB
-        mock_repo_instance.get_by_id.return_value = mock_account
-        with pytest.raises(ImportNotAllowedError) as exc_info:
-            await _validate_account_import(account_id, portfolio_id, user_id, "csv", mock_session)
-        assert "Schwab accounts require JSON format" in str(exc_info.value)
+    # Test schwab csv exception
+    mock_account.type = AccountType.SCHWAB
+    with pytest.raises(ImportNotAllowedError) as exc_info:
+        await _validate_account_import(account_id, portfolio_id, user_id, "csv", mock_service)
+    assert "Schwab accounts require JSON format" in str(exc_info.value)
 
 
 async def test_import_schwab_json(client: AsyncClient, primary_user: dict[str, Any], override_dependency):
@@ -410,7 +408,7 @@ async def test_flex_import(client: AsyncClient, primary_user: dict[str, Any], ov
     portfolio_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
-    with patch("app.api.v1.imports.AccountRepository.get_by_id", new_callable=AsyncMock) as mock_get:
+    with patch("app.api.v1.imports.AccountService.get_account", new_callable=AsyncMock) as mock_get:
         mock_get.return_value = MockAccount()
         response = await client.post(
             f"/api/v1/portfolios/{portfolio_id}/imports/flex?account_id={account_id}",
@@ -435,8 +433,8 @@ async def test_fresh_start_account_not_found(client: AsyncClient, primary_user: 
     portfolio_id = uuid.uuid4()
     account_id = uuid.uuid4()
     from unittest.mock import AsyncMock, patch
-    with patch("app.api.v1.imports.AccountRepository.get_by_id", new_callable=AsyncMock) as mock_get:
-        mock_get.return_value = None
+    with patch("app.api.v1.imports.AccountService.get_account", new_callable=AsyncMock) as mock_get:
+        mock_get.side_effect = AccountNotFoundError("Not found")
         response = await client.post(
             f"/api/v1/portfolios/{portfolio_id}/imports/{account_id}/fresh-start",
             data={"broker": "ibkr", "acknowledged": "true"}, files={"file": ("test.xml", b"x")}, headers=primary_user["headers"]
@@ -451,7 +449,7 @@ async def test_fresh_start_import_error(client: AsyncClient, primary_user: dict[
     from unittest.mock import AsyncMock, patch
     class MockAccount:
         type = "ibkr"
-    with patch("app.api.v1.imports.AccountRepository.get_by_id", new_callable=AsyncMock) as mock_get:
+    with patch("app.api.v1.imports.AccountService.get_account", new_callable=AsyncMock) as mock_get:
         mock_get.return_value = MockAccount()
         response = await client.post(
             f"/api/v1/portfolios/{portfolio_id}/imports/{account_id}/fresh-start",

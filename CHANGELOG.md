@@ -16,12 +16,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.18.0] - 2026-10-31
 
 ### Added
+- [imports] Added generic v1 CSV/JSON execution imports through the shared import pipeline, with mandatory stable `execution_id` values and account-scoped re-import deduplication.
+- [imports] Added strict derivative/OCC identity and `order_id` validation, requiring instrument IDs and consistent `OPEN`/`CLOSE` markers for order-linked fills and reported `realized_pnl` on their closing fills.
+- [imports] Added all-or-nothing validation with safe CSV line/JSON index and field errors; original records and unknown fields are retained as inert source metadata.
+- [backend] Added authenticated JSON Schema and CSV template downloads under `/api/v1/imports/generic`, linked from the import form and new other-broker help.
+- [accounts] Added file-only "Other broker (CSV/JSON)" accounts without credentials or API sync, with history guards for type changes to prevent mixed import namespaces.
+- [tools] Added a deterministic IBKR/Schwab-to-generic reference converter and CSV/JSON trade-parity fixtures/tests, with the native raw-cash override limitation documented.
 - [frontend] Added mobile trade detail tabs (`Overview`, `Journal`, `Executions`) with preserved chart and journal state, plus compact header KPIs for P&L, Realized R and Return %.
 - [frontend] Added mobile execution-leg cards with editing and action menus, touch-visible journal, screenshot and quick-note controls, and a fixed `Save`/`Cancel` bar for unsaved journal changes.
 - [frontend] Added a mobile trade card list with sorting, selection mode, a fixed bulk-action bar, compact pagination, and a tabbed filter sheet with live filtering and saved-view actions.
 - [frontend] Added `Previous`/`Next` navigation through filtered, sorted trade lists across pages on all viewports, with position indicators, `←`/`→` shortcuts, unsaved-journal confirmation, and `Back to Trades` restoring filters, sort and saved views.
 
+### Changed
+- [frontend] Improved mobile account-row wrapping, file-import status labels, and row/field validation-error readability.
+
 ### Fixed
+- [imports] Fixed projection matching and overwrite-protection isolation across accounts, symbols and asset classes, preventing unrelated fills with missing contract IDs from being suppressed or matched to protected trades.
 - [frontend] Fixed legacy lint and TypeScript errors by stabilizing hooks, synchronizing form drafts safely, and correcting DTO types.
 - [tests] Fixed stale unit-test contracts, navigation-sensitive Logout assertions, ambiguous Reporting filter selectors, and root Playwright SDK resolution so standard E2E runs no longer require temporary runtime aliases.
 - [frontend] Fixed `npm run lint` compatibility with Next.js 16 by replacing `next lint` with the ESLint CLI and flat configuration.

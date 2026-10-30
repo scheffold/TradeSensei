@@ -314,7 +314,7 @@ def test_protected_contract_suppresses_orphan_sentinel_trade() -> None:
 
     result = aggregate_executions_fifo_with_sources(
         trades,
-        protected_contracts={("PROT_ORPH", None)},
+        protected_contracts={("PROT_ORPH", None, str(AssetClass.EQUITY))},
     )
 
     assert result == []
@@ -345,7 +345,7 @@ def test_open_protected_seed_lot_closes_without_protected_suppression() -> None:
 
     result = aggregate_executions_fifo_with_sources(
         trades,
-        protected_contracts={("OTHER_SYMBOL", None)},
+        protected_contracts={("OTHER_SYMBOL", None, str(AssetClass.EQUITY))},
     )
 
     assert len(result) == 1
@@ -358,7 +358,7 @@ def test_open_protected_seed_lot_closes_without_protected_suppression() -> None:
 def test_opening_seed_plus_closing_leg_still_closes_when_contract_marked_protected() -> None:
     open_exec_id = uuid.uuid4()
     close_exec_id = uuid.uuid4()
-    contract = ("PROT_SEED", "3001")
+    contract = ("PROT_SEED", None, str(AssetClass.EQUITY))
     trades = [
         _trade(
             symbol="PROT_SEED",
@@ -406,7 +406,7 @@ def test_non_protected_contract_still_creates_orphan_sentinel_trade() -> None:
 
     result = aggregate_executions_fifo_with_sources(
         trades,
-        protected_contracts={("OTHER_SYMBOL", None)},
+        protected_contracts={("OTHER_SYMBOL", None, str(AssetClass.EQUITY))},
     )
 
     assert len(result) == 1

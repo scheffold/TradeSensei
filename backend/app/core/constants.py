@@ -157,6 +157,60 @@ IMPORT_MEMORY_ALERT_THRESHOLD_BYTES: int = 128 * BYTES_PER_MB
 IMPORT_SUPPORTED_FORMATS: list[str] = ["csv", "xlsx", "xml"]
 """File extensions accepted by the broker import endpoint."""
 
+# ─── Generic execution import ─────────────────────────────────────────────────
+
+GENERIC_IMPORT_BROKER: str = "generic"
+"""Broker namespace for the versioned generic execution format."""
+
+GENERIC_EXECUTION_ID_MAX_LENGTH: int = 100
+"""Maximum generic execution ID length before account/user namespacing."""
+
+GENERIC_INSTRUMENT_ID_MAX_LENGTH: int = 50
+"""Maximum generic contract identifier length."""
+
+GENERIC_IMPORT_MAX_ERRORS: int = 200
+"""Maximum number of row errors included in an HTTP error response."""
+
+GENERIC_IMPORT_SCHEMA_VERSION_PATTERN: str = r"^1(?:\..*)?$"
+"""Supported generic document versions: 1 and any 1.x version."""
+
+GENERIC_IMPORT_DECIMAL_PATTERN: str = r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?"
+"""Decimal syntax without thousands separators or binary float conversion."""
+
+GENERIC_IMPORT_DATE_PATTERN: str = r"[0-9]{4}-[0-9]{2}-[0-9]{2}"
+"""ISO calendar-date syntax accepted for generic contract and split dates."""
+
+# Read by BrokerRawTransactionRepository.get_combo_order_meta_by_raw_ids.
+# Kept here rather than in the parser to avoid a schema ↔ parser import cycle.
+GENERIC_PIPELINE_ORDER_ID_KEY: str = "brokerageOrderID"
+"""Existing pipeline key for grouping executions belonging to one order."""
+
+GENERIC_PIPELINE_NET_CASH_KEY: str = "netCash"
+"""Existing pipeline key for signed execution proceeds after commission."""
+
+GENERIC_IMPORT_SOURCE_RECORD_KEY: str = "source_record"
+"""Inert original generic payload, separated from active pipeline metadata."""
+
+GENERIC_ACCOUNT_CREDENTIALS_ERROR: str = "Generic accounts do not support broker credentials."
+"""Safe validation message for generic account credential operations."""
+
+GENERIC_ACCOUNT_API_ERROR: str = "Generic accounts do not support API connections or sync."
+"""Safe validation message for generic account API operations."""
+
+GENERIC_ACCOUNT_HISTORY_ERROR: str = (
+    "Account type cannot change to or from generic while trade or execution history remains. Clear all trades or create a new account first."
+)
+"""Prevent a populated account from mixing generic and native ID namespaces."""
+
+GENERIC_IMPORT_URL_PREFIX: str = "/imports/generic"
+"""Authenticated, portfolio-independent route prefix for format downloads."""
+
+GENERIC_IMPORT_SCHEMA_FILENAME: str = "generic-executions-v1.schema.json"
+"""Download filename for the generic v1 JSON Schema."""
+
+GENERIC_IMPORT_TEMPLATE_FILENAME: str = "generic-executions-v1.csv"
+"""Download filename for the generic v1 CSV template."""
+
 FLEX_BASE_URL: str = "https://gdcdyn.interactivebrokers.com/Universal/servlet"
 """Base URL for the IBKR Flex Web Service API."""
 

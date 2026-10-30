@@ -25,6 +25,7 @@ from sqlalchemy import Numeric, cast, delete, exists, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.constants import GENERIC_IMPORT_BROKER, GENERIC_PIPELINE_ORDER_ID_KEY
 from app.models.broker_raw_transaction import BrokerRawTransaction
 from app.models.logical_execution import LogicalExecution
 from app.schemas.broker_raw_transaction import BrokerRawTransactionCreate
@@ -260,6 +261,44 @@ class BrokerRawTransactionRepository:
                 "netCash": row.net_cash,
             }
         return meta
+
+    async def get_generic_order_markers(
+        self,
+        user_id: uuid.UUID,
+        account_id: uuid.UUID,
+        order_ids: Sequence[str],
+    ) -> dict[str, set[str | None]]:
+        """Read trusted generic order markers for one user and target account.
+
+        Suppressed raw rows still participate. Original source extras nested
+        under source_record are deliberately not consulted.
+
+        Args:
+            user_id: UUID of the owning user.
+            account_id: UUID of the locked target account.
+            order_ids: Validated public order identifiers in the incoming file.
+
+        Returns:
+            Persisted opening/closing markers grouped by trusted order ID.
+        """
+        if not order_ids:
+            return {}
+        order_id = BrokerRawTransaction.raw_data[GENERIC_PIPELINE_ORDER_ID_KEY].astext
+        stmt = (
+            select(order_id.label("order_id"), BrokerRawTransaction.open_close)
+            .where(
+                BrokerRawTransaction.user_id == user_id,
+                BrokerRawTransaction.account_id == account_id,
+                BrokerRawTransaction.broker_type == GENERIC_IMPORT_BROKER,
+                order_id.in_(list(order_ids)),
+            )
+            .distinct()
+        )
+        result = await self._session.execute(stmt)
+        markers: dict[str, set[str | None]] = {}
+        for row in result:
+            markers.setdefault(row.order_id, set()).add(row.open_close)
+        return markers
 
     async def set_suppressed(self, raw_id: str, suppressed: bool, user_id: uuid.UUID | None = None) -> bool:
         """Toggle the suppressed flag on a raw transaction.
